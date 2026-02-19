@@ -12,10 +12,14 @@
 # If no GUI editor is found, opens the file normally (no pager).
 set -euo pipefail
 
-# ── Resolve real script path (follows symlinks on macOS and Linux) ────────────
-_REAL_SCRIPT="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" \
-    "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(dirname "$_REAL_SCRIPT")"
+# ── Resolve real script path (pure bash, no python3) ─────────────────────────
+_link="${BASH_SOURCE[0]}"
+while [[ -L "$_link" ]]; do
+    _dir="$(cd "$(dirname "$_link")" && pwd)"
+    _link="$(readlink "$_link")"
+    [[ "$_link" != /* ]] && _link="$_dir/$_link"
+done
+SCRIPT_DIR="$(cd "$(dirname "$_link")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 # ── Resolve the file path ─────────────────────────────────────────────────────
@@ -23,7 +27,7 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 FILE="${1:-}"
 
 # ── Resolve the GUI editor ────────────────────────────────────────────────────
-SELF="$_REAL_SCRIPT"
+SELF="$_link"
 REAL_EDITOR=""
 
 # Prefer CLAUDE_PAGER_EDITOR if set in environment
@@ -32,15 +36,11 @@ if [[ -n "${CLAUDE_PAGER_EDITOR:-}" ]]; then
 fi
 
 # If not in env, read it from Claude Code's settings.json (env block)
+# Uses sed — no python3 startup cost
 if [[ -z "$REAL_EDITOR" ]] && [[ -f "$HOME/.claude/settings.json" ]]; then
-    REAL_EDITOR=$(python3 -c "
-import json, sys
-try:
-    s = json.load(open('$HOME/.claude/settings.json'))
-    print(s.get('env', {}).get('CLAUDE_PAGER_EDITOR', ''))
-except Exception:
-    pass
-" 2>/dev/null || true)
+    REAL_EDITOR=$(sed -n \
+        's/.*"CLAUDE_PAGER_EDITOR"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$HOME/.claude/settings.json" 2>/dev/null | head -1 || true)
 fi
 
 # Fall back to $VISUAL / $EDITOR, skipping if they point back to this shim
@@ -48,7 +48,9 @@ if [[ -z "$REAL_EDITOR" ]]; then
     for var in "${VISUAL:-}" "${EDITOR:-}"; do
         [[ -z "$var" ]] && continue
         resolved="$(command -v "$var" 2>/dev/null || echo "$var")"
-        [[ "$(readlink -f "$resolved" 2>/dev/null || echo "$resolved")" == "$(readlink -f "$SELF")" ]] && continue
+        # Resolve one level of symlink for comparison (readlink without -f is safe on macOS)
+        resolved_real="$(readlink "$resolved" 2>/dev/null || echo "$resolved")"
+        [[ "$resolved_real" == "$SELF" || "$resolved" == "$SELF" ]] && continue
         REAL_EDITOR="$var"
         break
     done
@@ -100,27 +102,18 @@ for _ in 1 2 3 4 5 6; do
     pid=$ppid
 done
 
-# Strategy 2: derive from $PWD
+# Strategy 2: derive from $PWD — use ls -t, no python3
 if [[ -z "$TRANSCRIPT" || ! -f "$TRANSCRIPT" ]]; then
     PROJECT_KEY=$(printf '%s' "$PWD" | tr '/' '-')
     PROJECT_DIR="$HOME/.claude/projects/$PROJECT_KEY"
     if [[ -d "$PROJECT_DIR" ]]; then
-        TRANSCRIPT=$(python3 -c "
-import glob, os, sys
-d = sys.argv[1]
-f = sorted(glob.glob(os.path.join(d, '*.jsonl')), key=os.path.getmtime)
-print(f[-1] if f else '')
-" "$PROJECT_DIR" 2>/dev/null || true)
+        TRANSCRIPT=$(ls -t "$PROJECT_DIR"/*.jsonl 2>/dev/null | head -1 || true)
     fi
 fi
 
-# Strategy 3: globally most recent (last resort)
+# Strategy 3: globally most recent (last resort) — use ls -t, no python3
 if [[ -z "$TRANSCRIPT" || ! -f "$TRANSCRIPT" ]]; then
-    TRANSCRIPT=$(python3 -c "
-import glob, os
-f = sorted(glob.glob(os.path.expanduser('~/.claude/projects/*/*.jsonl')), key=os.path.getmtime)
-print(f[-1] if f else '')
-" 2>/dev/null || true)
+    TRANSCRIPT=$(ls -t "$HOME"/.claude/projects/*/*.jsonl 2>/dev/null | head -1 || true)
 fi
 
 # ── Start pager ──────────────────────────────────────────────────────────────
