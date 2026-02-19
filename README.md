@@ -17,7 +17,7 @@ A scrollable terminal pager for Claude Code session transcripts. When you press 
 
 - Python 3.9+
 - macOS or Linux
-- A GUI editor for Claude Code's Ctrl-G feature (e.g. PromptPad)
+- A GUI editor for Claude Code's Ctrl-G feature (e.g. TurboDraft)
 
 ## Install
 
@@ -41,9 +41,25 @@ pip install -e '.[highlighting]'
 
 ## Claude Code Setup
 
-### 1. Configure the editor shim
+### 1. Configure the editor
 
-Set Claude Code's editor to the included shim script:
+**TurboDraft users (recommended):** use the compiled C binary for zero-overhead editor launch:
+
+```sh
+cd /path/to/claude-pager/bin && make
+```
+
+Then set Claude Code's editor to the binary:
+
+```json
+{
+  "editor": "/path/to/claude-pager/bin/claude-pager-open"
+}
+```
+
+`claude-pager-open` talks directly to TurboDraft's Unix socket, bypassing the bash shim (~25 ms), `turbodraft-editor`'s osascript (~234 ms), and `turbodraft-open` startup (~5 ms). Total savings: ~264 ms.
+
+**Other editors:** use the bash shim:
 
 ```json
 {
@@ -51,17 +67,21 @@ Set Claude Code's editor to the included shim script:
 }
 ```
 
-The shim launches your GUI editor immediately, then starts the pager in the background.
+Both approaches launch the editor immediately and start the pager in the background.
 
 ### 2. Set your GUI editor
 
-The shim needs to know which GUI editor to launch. Set the `TRANSCRIPT_EDITOR` environment variable:
+Set `CLAUDE_PAGER_EDITOR` in Claude Code's `env` settings:
 
-```sh
-export TRANSCRIPT_EDITOR=promptpad-editor
+```json
+{
+  "env": {
+    "CLAUDE_PAGER_EDITOR": "turbodraft-editor"
+  }
+}
 ```
 
-If `TRANSCRIPT_EDITOR` is not set, the shim looks for `promptpad-editor` on your PATH.
+The bash shim also falls back to `$VISUAL` / `$EDITOR` if `CLAUDE_PAGER_EDITOR` is unset. `claude-pager-open` uses TurboDraft's socket directly and does not need this variable.
 
 ### 3. Install the session hook (recommended)
 
@@ -98,7 +118,7 @@ Without this hook, the pager falls back to finding the most recent transcript in
 
 | Environment Variable | Description |
 |---|---|
-| `TRANSCRIPT_EDITOR` | Path to your GUI editor |
+| `CLAUDE_PAGER_EDITOR` | Path to your GUI editor (used by the bash shim) |
 | `CLAUDE_PAGER_LOG` | Write debug logs to this file path |
 
 CLI options (when running standalone):
@@ -109,8 +129,19 @@ claude-pager [transcript.jsonl] [editor_pid] [--ctx-limit TOKENS] [--log-file PA
 
 ## How It Works
 
-1. Claude Code opens the alt screen and spawns the editor shim
-2. The shim launches your GUI editor (zero latency)
+**With `claude-pager-open` (TurboDraft):**
+
+1. Claude Code spawns `claude-pager-open`
+2. The binary connects to TurboDraft's Unix socket (~0 ms) and sends a `session.open` request
+3. TurboDraft opens the file immediately — no bash, no osascript, no extra process spawning
+4. The binary forks `pager-setup.sh` in the background to find the transcript and start the pager
+5. The binary blocks on `session.wait` until TurboDraft closes the session
+6. On close: the pager is terminated and the binary exits
+
+**With `claude-pager-shim.sh` (other editors):**
+
+1. Claude Code opens the alt screen and spawns the bash shim
+2. The shim launches your GUI editor immediately, then starts the pager in the background
 3. The shim finds the current session's transcript via:
    - TTY-keyed file written by the SessionStart hook
    - PWD-derived project directory lookup
