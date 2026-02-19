@@ -12,46 +12,44 @@
 # If no GUI editor is found, opens the file normally (no pager).
 set -euo pipefail
 
-# ── Resolve real script path (pure bash, no python3) ─────────────────────────
-_link="${BASH_SOURCE[0]}"
-while [[ -L "$_link" ]]; do
-    _dir="$(cd "$(dirname "$_link")" && pwd)"
-    _link="$(readlink "$_link")"
-    [[ "$_link" != /* ]] && _link="$_dir/$_link"
-done
-SCRIPT_DIR="$(cd "$(dirname "$_link")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
-
 # ── Resolve the file path ─────────────────────────────────────────────────────
-# Claude Code passes exactly one argument: the temp file to edit.
 FILE="${1:-}"
 
-# ── Resolve the GUI editor ────────────────────────────────────────────────────
-SELF="$_link"
-REAL_EDITOR=""
+# ── Resolve the GUI editor — fast path first, no process spawns ──────────────
 
-# Prefer CLAUDE_PAGER_EDITOR if set in environment
-if [[ -n "${CLAUDE_PAGER_EDITOR:-}" ]]; then
-    REAL_EDITOR="$CLAUDE_PAGER_EDITOR"
-fi
+# 1. Env var (zero cost)
+REAL_EDITOR="${CLAUDE_PAGER_EDITOR:-}"
 
-# If not in env, read it from Claude Code's settings.json (env block)
-# Uses sed — no python3 startup cost
+# 2. Cache-backed settings.json lookup — only sed on first run or after changes
 if [[ -z "$REAL_EDITOR" ]] && [[ -f "$HOME/.claude/settings.json" ]]; then
-    REAL_EDITOR=$(sed -n \
-        's/.*"CLAUDE_PAGER_EDITOR"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$HOME/.claude/settings.json" 2>/dev/null | head -1 || true)
+    _CACHE="${TMPDIR:-/tmp}/.claude-pager-editor"
+    if [[ -s "$_CACHE" ]] && [[ ! "$HOME/.claude/settings.json" -nt "$_CACHE" ]]; then
+        IFS= read -r REAL_EDITOR < "$_CACHE"   # shell builtin — zero process spawns
+    else
+        REAL_EDITOR=$(sed -n \
+            's/.*"CLAUDE_PAGER_EDITOR"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$HOME/.claude/settings.json" 2>/dev/null | head -1 || true)
+        [[ -n "$REAL_EDITOR" ]] && printf '%s\n' "$REAL_EDITOR" > "$_CACHE"
+    fi
 fi
 
-# Fall back to $VISUAL / $EDITOR, skipping if they point back to this shim
+# 3. $VISUAL / $EDITOR fallback — only reached if CLAUDE_PAGER_EDITOR is unset.
+#    Resolve real script path here (lazy — skipped on hot path).
 if [[ -z "$REAL_EDITOR" ]]; then
-    for var in "${VISUAL:-}" "${EDITOR:-}"; do
-        [[ -z "$var" ]] && continue
-        resolved="$(command -v "$var" 2>/dev/null || echo "$var")"
-        # Resolve one level of symlink for comparison (readlink without -f is safe on macOS)
-        resolved_real="$(readlink "$resolved" 2>/dev/null || echo "$resolved")"
-        [[ "$resolved_real" == "$SELF" || "$resolved" == "$SELF" ]] && continue
-        REAL_EDITOR="$var"
+    _link="${BASH_SOURCE[0]}"
+    while [[ -L "$_link" ]]; do
+        _dir="$(cd "$(dirname "$_link")" && pwd)"
+        _link="$(readlink "$_link")"
+        [[ "$_link" != /* ]] && _link="$_dir/$_link"
+    done
+    SELF="$_link"
+
+    for _var in "${VISUAL:-}" "${EDITOR:-}"; do
+        [[ -z "$_var" ]] && continue
+        _resolved="$(command -v "$_var" 2>/dev/null || echo "$_var")"
+        _resolved_real="$(readlink "$_resolved" 2>/dev/null || echo "$_resolved")"
+        [[ "$_resolved_real" == "$SELF" || "$_resolved" == "$SELF" ]] && continue
+        REAL_EDITOR="$_var"
         break
     done
 fi
@@ -66,6 +64,21 @@ if [[ -z "$REAL_EDITOR" ]]; then
     exit 0
 fi
 
+# ── Launch editor immediately — everything above is shell builtins on hot path ─
+PARENT_PID=$PPID
+$REAL_EDITOR "$FILE" &
+EDITOR_PID=$!
+
+# ── Resolve repo path for pager (runs after editor is already launched) ────────
+_link="${BASH_SOURCE[0]}"
+while [[ -L "$_link" ]]; do
+    _dir="$(cd "$(dirname "$_link")" && pwd)"
+    _link="$(readlink "$_link")"
+    [[ "$_link" != /* ]] && _link="$_dir/$_link"
+done
+SCRIPT_DIR="$(cd "$(dirname "$_link")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+
 # ── Resolve the pager command ─────────────────────────────────────────────────
 if command -v claude-pager &>/dev/null; then
     PAGER_CMD="claude-pager"
@@ -76,12 +89,6 @@ else
     fi
     PAGER_CMD="python3 -m claude_pager"
 fi
-
-PARENT_PID=$PPID
-
-# ── Launch editor with zero added latency ─────────────────────────────────────
-$REAL_EDITOR "$FILE" &
-EDITOR_PID=$!
 
 # ── Find transcript path (fast — a few ps calls) ─────────────────────────────
 TRANSCRIPT=""
