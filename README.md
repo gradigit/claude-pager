@@ -34,7 +34,7 @@ pip install 'claude-pager[highlighting]'
 Or install from source:
 
 ```sh
-git clone https://github.com/youruser/claude-pager.git
+git clone https://github.com/gradigit/claude-pager.git
 cd claude-pager
 pip install -e '.[highlighting]'
 ```
@@ -123,7 +123,7 @@ The pager uses alternate scroll mode (`\033[?1007h`) instead of mouse tracking, 
 ## Development
 
 ```sh
-git clone https://github.com/youruser/claude-pager.git
+git clone https://github.com/gradigit/claude-pager.git
 cd claude-pager
 pip install -e '.[highlighting]'
 python -m pytest
