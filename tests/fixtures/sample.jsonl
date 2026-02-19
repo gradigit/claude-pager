@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"Hello, can you help me?"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sure! How can I help you today?"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"/tmp/test.py"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"print('hello')"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here is a file with a simple print statement.\n\n```python\nprint('hello')\n```\n\n## Summary\n\nThe file prints hello."}]}}
