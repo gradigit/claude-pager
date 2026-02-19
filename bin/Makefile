@@ -1,19 +1,26 @@
 CC      = clang
 CFLAGS  = -O2 -Wall -Wextra
-BINARY  = claude-pager-open
-SRCS    = claude-pager-open.c pager.c
-OBJS    = claude-pager-open.o pager.o
 
-$(BINARY): $(OBJS)
-	$(CC) $(CFLAGS) -o $(BINARY) $(OBJS)
+BINARIES = claude-pager-open claude-pager-c
+COMMON   = pager.o
+
+claude-pager-open: claude-pager-open.o $(COMMON)
+	$(CC) $(CFLAGS) -o $@ claude-pager-open.o $(COMMON)
+
+claude-pager-c: pager_cli.o $(COMMON)
+	$(CC) $(CFLAGS) -o $@ pager_cli.o $(COMMON)
 
 %.o: %.c pager.h
 	$(CC) $(CFLAGS) -c $<
 
-install: $(BINARY)
-	@echo "Built: $$(pwd)/$(BINARY)"
+all: $(BINARIES)
+
+install: all
+	@echo "Built: $$(pwd)/claude-pager-open"
+	@echo "Built: $$(pwd)/claude-pager-c"
 
 clean:
-	rm -f $(BINARY) $(OBJS)
+	rm -f $(BINARIES) *.o
 
-.PHONY: install clean
+.PHONY: all install clean
+.DEFAULT_GOAL := all

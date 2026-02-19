@@ -80,7 +80,10 @@ SCRIPT_DIR="$(cd "$(dirname "$_link")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 # ── Resolve the pager command ─────────────────────────────────────────────────
-if command -v claude-pager &>/dev/null; then
+# Prefer C pager (fast, zero-dependency) over Python
+if command -v claude-pager-c &>/dev/null; then
+    PAGER_CMD="claude-pager-c"
+elif command -v claude-pager &>/dev/null; then
     PAGER_CMD="claude-pager"
 else
     # Running from source — add src/ to Python path

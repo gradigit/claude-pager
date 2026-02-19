@@ -40,6 +40,9 @@
 #define C_BRY   "\033[38;2;255;165;0m"
 #define C_BRR   "\033[38;2;255;80;80m"
 #define C_CONN  "\033[38;2;60;60;80m"
+#define C_URL   "\033[38;2;255;165;0m"
+#define UL_ON   "\033[4m"
+#define UL_OFF  "\033[24m"
 
 #define HL  "\xe2\x94\x80"
 #define VL  "\xe2\x94\x82"
@@ -251,27 +254,88 @@ static int is_pathch(char c) {
            (c>='0'&&c<='9') || c=='_' || c=='.' || c=='-' || c=='/';
 }
 
-static int g_lstyle = 0;
+/* Shorten URL for display: strip protocol, truncate with … */
+static void shorten_url(char *dst, int dstmax, const char *url, int ulen) {
+    const char *d = url;
+    int dlen = ulen;
+    if (dlen >= 8 && memcmp(d, "https://", 8) == 0) { d += 8; dlen -= 8; }
+    else if (dlen >= 7 && memcmp(d, "http://", 7) == 0) { d += 7; dlen -= 7; }
 
-static void lf_style_on(char *dst, int dstmax, int *o) {
-    const char *s;
-    switch (g_lstyle++ % 4) {
-    case 0:  s = "\033\\\033[4m"; break;                          /* A: standard underline */
-    case 1:  s = "\033\\\033[4;58;2;100;180;255m"; break;        /* B: blue colored underline */
-    case 2:  s = "\033\\\033[4:3;58;2;255;165;0m"; break;        /* C: wavy orange underline */
-    default: s = "\033\\\033[4:4;58;2;100;220;100m"; break;      /* D: dotted green underline */
+    if (dlen <= 60) {
+        int n = dlen < dstmax-1 ? dlen : dstmax-1;
+        memcpy(dst, d, n); dst[n] = '\0';
+        return;
     }
-    while (*s && *o < dstmax-1) dst[(*o)++] = *s++;
+
+    const char *sl = memchr(d, '/', dlen);
+    if (!sl) {
+        int n = 59 < dstmax-4 ? 59 : dstmax-4;
+        memcpy(dst, d, n); memcpy(dst+n, ELL, 3); dst[n+3] = '\0';
+        return;
+    }
+
+    int domlen = (int)(sl - d) + 1;
+    int avail = 60 - domlen - 1; /* 1 visible char for … */
+    if (avail < 8) {
+        int n = 59 < dstmax-4 ? 59 : dstmax-4;
+        memcpy(dst, d, n); memcpy(dst+n, ELL, 3); dst[n+3] = '\0';
+        return;
+    }
+
+    int tail = avail / 3; if (tail > 20) tail = 20;
+    int head = avail - tail;
+    const char *path = sl + 1;
+    int pathlen = dlen - domlen;
+    if (tail > pathlen) tail = pathlen;
+    if (head > pathlen) head = pathlen;
+
+    int o = 0;
+    memcpy(dst+o, d, domlen); o += domlen;
+    int hc = head < pathlen ? head : pathlen;
+    memcpy(dst+o, path, hc); o += hc;
+    memcpy(dst+o, ELL, 3); o += 3;
+    if (tail > 0 && pathlen > tail) {
+        memcpy(dst+o, path + pathlen - tail, tail); o += tail;
+    }
+    dst[o] = '\0';
 }
 
-static void lf_style_off(char *dst, int dstmax, int *o, int style) {
-    const char *s;
-    switch (style % 4) {
-    case 0:  s = "\033[24m\033]8;;\033\\"; break;
-    case 1:  s = "\033[24;59m\033]8;;\033\\"; break;
-    default: s = "\033[4:0;59m\033]8;;\033\\"; break;
+/* Shorten file path for display: …/parent/filename */
+static void shorten_path(char *dst, int dstmax, const char *path, int plen) {
+    if (plen <= 50) {
+        int n = plen < dstmax-1 ? plen : dstmax-1;
+        memcpy(dst, path, n); dst[n] = '\0';
+        return;
     }
-    while (*s && *o < dstmax-1) dst[(*o)++] = *s++;
+
+    /* Find last two slashes (scanning backwards) */
+    const char *last = NULL, *prev = NULL;
+    for (int i = plen-1; i >= 0; i--) {
+        if (path[i] == '/') {
+            if (!last) last = path + i;
+            else if (!prev) { prev = path + i; break; }
+        }
+    }
+
+    if (!last) {
+        snprintf(dst, dstmax, ELL "/%.*s", plen < 48 ? plen : 48, path);
+        return;
+    }
+
+    if (prev) {
+        int slen = (int)(path + plen - prev);
+        if (slen + 1 <= 50) { /* +1 for … visible char */
+            snprintf(dst, dstmax, ELL "%.*s", slen, prev);
+            return;
+        }
+    }
+
+    int flen = (int)(path + plen - last);
+    if (flen + 1 <= 50) {
+        snprintf(dst, dstmax, ELL "%.*s", flen, last);
+        return;
+    }
+    snprintf(dst, dstmax, ELL "/%.*s", 48, last + 1);
 }
 
 static void linkify(char *dst, int dstmax, const char *src) {
@@ -319,13 +383,16 @@ static void linkify(char *dst, int dstmax, const char *src) {
             while (*p && is_urlch(*p)) p++;
             while (p>start && (p[-1]=='.'||p[-1]==','||p[-1]==';'||p[-1]==':')) p--;
             int ulen = (int)(p - start);
-            if (ulen > 10 && o + ulen*2 + 80 < dstmax) {
-                int sty = g_lstyle;
+            if (ulen > 10 && o + ulen + 200 < dstmax) {
+                char label[256];
+                shorten_url(label, sizeof(label), start, ulen);
                 LF_S("\033]8;;");
                 for (int i=0; i<ulen; i++) LF_CH(start[i]);
-                lf_style_on(dst, dstmax, &o);
-                for (int i=0; i<ulen; i++) LF_CH(start[i]);
-                lf_style_off(dst, dstmax, &o, sty);
+                LF_CH('\a');
+                LF_S(C_URL UL_ON);
+                LF_S(label);
+                LF_S(UL_OFF);
+                LF_S("\033]8;;\a");
             } else {
                 for (int i=0; i<ulen; i++) LF_CH(start[i]);
             }
@@ -341,16 +408,19 @@ static void linkify(char *dst, int dstmax, const char *src) {
             if (has_slash && (sp-start) >= 3) {
                 p = sp;
                 while (p>start+1 && (p[-1]=='.'||p[-1]==',')) p--;
-                int plen = (int)(p - start);
-                if (o + plen*2 + 100 < dstmax) {
-                    int sty = g_lstyle;
+                int fplen = (int)(p - start);
+                if (o + fplen + 200 < dstmax) {
+                    char label[256];
+                    shorten_path(label, sizeof(label), start, fplen);
                     LF_S("\033]8;;file://");
-                    for (int i=0; i<plen; i++) LF_CH(start[i]);
-                    lf_style_on(dst, dstmax, &o);
-                    for (int i=0; i<plen; i++) LF_CH(start[i]);
-                    lf_style_off(dst, dstmax, &o, sty);
+                    for (int i=0; i<fplen; i++) LF_CH(start[i]);
+                    LF_CH('\a');
+                    LF_S(UL_ON);
+                    LF_S(label);
+                    LF_S(UL_OFF);
+                    LF_S("\033]8;;\a");
                 } else {
-                    for (int i=0; i<plen; i++) LF_CH(start[i]);
+                    for (int i=0; i<fplen; i++) LF_CH(start[i]);
                 }
                 continue;
             }
@@ -718,7 +788,7 @@ static void render_items(Lines *L, Items *items) {
                 snprintf(b, sizeof(b), C_TOL REC " " BO "%s" RS C_TOL "(%s)" RS, it->text, it->label);
             else
                 snprintf(b, sizeof(b), C_TOL REC " " BO "%s" RS, it->text);
-            L_pushw(L, b);
+            L_pushw_link(L, b);
             break;
 
         case IT_TR: {
@@ -896,7 +966,6 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
                 tok = 0; pct = 0;
                 parse_transcript(transcript, &items, &tok, &pct, ctx_limit);
                 L_free(&L);
-                g_lstyle = 0;
                 render_items(&L, &items);
                 L_push(&L, C_HDM "  " HL HL HL " end of transcript " HL HL HL RS);
                 L_push(&L, ""); L_push(&L, "");
