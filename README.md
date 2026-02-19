@@ -30,6 +30,10 @@ curl -sSL https://raw.githubusercontent.com/gradigit/claude-pager/main/install.s
 
 This clones the repo to `~/.claude-pager`, builds the binary, and creates the editor shim. Follow the printed instructions to set your `VISUAL`/`EDITOR` env vars.
 
+### AI agent install
+
+Paste `https://github.com/gradigit/claude-pager` into Claude Code or any AI coding agent. The [agent instructions](#agent-instructions) below have everything it needs to install and configure claude-pager automatically.
+
 ### Manual install
 
 ```sh
@@ -138,58 +142,78 @@ claude-pager-open (C binary, ~70KB)
 └── Recursion guard (_CLAUDE_PAGER_ACTIVE env var)
 ```
 
-## AI Agents
+## Agent Instructions
 
-Paste this repo URL into a Claude Code session and it will know how to set everything up.
+This section is for AI coding agents (Claude Code, Cursor, Copilot, etc.). Everything here is deterministic — no user input is needed. Detect the user's shell from `$SHELL` and proceed.
 
-**For AI agents**: here is everything you need to install and configure claude-pager for the user.
+### 1. Check prerequisites
 
-### Steps
+```sh
+# macOS required; ensure a C compiler is available
+xcode-select -p >/dev/null 2>&1 || xcode-select --install
+```
 
-1. **Clone and build**:
-   ```sh
-   git clone https://github.com/gradigit/claude-pager.git ~/.claude-pager
-   make -C ~/.claude-pager/bin
-   ```
+### 2. Clone and build
 
-2. **Create editor shim** at `~/.claude/editor-shim.sh`:
-   ```sh
-   #!/usr/bin/env bash
-   exec ~/.claude-pager/bin/claude-pager-open "$@"
-   ```
-   Then `chmod +x ~/.claude/editor-shim.sh`.
+```sh
+git clone https://github.com/gradigit/claude-pager.git ~/.claude-pager
+make -C ~/.claude-pager/bin
+# verify binary exists
+test -x ~/.claude-pager/bin/claude-pager-open
+```
 
-3. **Set VISUAL/EDITOR** in the user's shell config:
-   - fish (`~/.config/fish/config.fish`): `set -gx VISUAL ~/.claude/editor-shim.sh` and `set -gx EDITOR ~/.claude/editor-shim.sh`
-   - bash (`~/.bashrc`): `export VISUAL=~/.claude/editor-shim.sh` and `export EDITOR=~/.claude/editor-shim.sh`
-   - zsh (`~/.zshrc`): `export VISUAL=~/.claude/editor-shim.sh` and `export EDITOR=~/.claude/editor-shim.sh`
+### 3. Create editor shim
 
-4. **Add the session hook** to `~/.claude/settings.json`:
-   ```json
-   {
-     "hooks": {
-       "SessionStart": [
-         {
-           "type": "command",
-           "command": "~/.claude-pager/shim/save-session-transcript.sh"
-         }
-       ]
-     }
-   }
-   ```
-   If `settings.json` already exists, merge the `SessionStart` hook into the existing `hooks` object. Do not overwrite other settings.
+Write `~/.claude/editor-shim.sh`:
 
-5. **(Optional) Set a specific editor** if the user doesn't want to use their default `VISUAL`/`EDITOR`:
-   Add `"CLAUDE_PAGER_EDITOR": "code -w"` (or `"subl -w"`, `"turbodraft-editor"`, etc.) to the `env` object in `~/.claude/settings.json`.
+```sh
+#!/usr/bin/env bash
+exec ~/.claude-pager/bin/claude-pager-open "$@"
+```
 
-6. **Verify**: tell the user to restart their shell and press Ctrl-G in Claude Code. They should see the pager render their conversation transcript while the editor is open.
+Then `chmod +x ~/.claude/editor-shim.sh`.
 
-### Notes for agents
+### 4. Set VISUAL and EDITOR
 
-- The binary requires macOS and a C compiler (`xcode-select --install` if needed)
-- The binary auto-detects TurboDraft — no special config needed
-- The session hook is important for multi-session support; without it, the pager uses the most recent transcript
-- The `_CLAUDE_PAGER_ACTIVE` env var prevents infinite recursion if `VISUAL`/`EDITOR` points to the shim
+Detect the user's shell from `$SHELL` and append to the appropriate config file:
+
+| Shell | Config file | Lines to add |
+|---|---|---|
+| fish | `~/.config/fish/config.fish` | `set -gx VISUAL ~/.claude/editor-shim.sh` and `set -gx EDITOR ~/.claude/editor-shim.sh` |
+| zsh | `~/.zshrc` | `export VISUAL=~/.claude/editor-shim.sh` and `export EDITOR=~/.claude/editor-shim.sh` |
+| bash | `~/.bashrc` | `export VISUAL=~/.claude/editor-shim.sh` and `export EDITOR=~/.claude/editor-shim.sh` |
+
+Check if these lines already exist before adding them. If `VISUAL`/`EDITOR` are already set to something else, replace them.
+
+### 5. Add the session hook
+
+Read `~/.claude/settings.json` (create it if missing). Merge a `SessionStart` hook into the `hooks` object — do not overwrite existing hooks or other settings:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "~/.claude-pager/shim/save-session-transcript.sh"
+      }
+    ]
+  }
+}
+```
+
+If a `SessionStart` array already exists, append to it. If the hook command is already present, skip.
+
+### 6. Done
+
+Tell the user to restart their shell (or `source` their config) and press **Ctrl-G** in Claude Code. The pager will render their conversation transcript while the editor is open.
+
+### Agent notes
+
+- The binary auto-detects TurboDraft's Unix socket — no special config needed for TurboDraft users
+- If no `CLAUDE_PAGER_EDITOR` is set, the binary uses `VISUAL` → `EDITOR` → macOS `open -W -t`
+- The session hook enables multi-session support; without it the pager falls back to the most recent transcript in the project directory
+- `_CLAUDE_PAGER_ACTIVE` env var is set internally to prevent recursion when `VISUAL`/`EDITOR` points to the shim — agents do not need to set this
 
 ## Development
 
