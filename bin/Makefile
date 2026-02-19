@@ -1,16 +1,19 @@
 CC      = clang
 CFLAGS  = -O2 -Wall -Wextra
 BINARY  = claude-pager-open
+SRCS    = claude-pager-open.c pager.c
+OBJS    = claude-pager-open.o pager.o
 
-$(BINARY): claude-pager-open.c
-	$(CC) $(CFLAGS) -o $(BINARY) claude-pager-open.c
+$(BINARY): $(OBJS)
+	$(CC) $(CFLAGS) -o $(BINARY) $(OBJS)
+
+%.o: %.c pager.h
+	$(CC) $(CFLAGS) -c $<
 
 install: $(BINARY)
 	@echo "Built: $$(pwd)/$(BINARY)"
-	@echo "Set your Claude Code editor in settings.json:"
-	@echo '  { "editor": "$$(pwd)/$(BINARY)" }'
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(OBJS)
 
 .PHONY: install clean

@@ -9,6 +9,13 @@ FILE="${1:-}"
 EDITOR_PID="${2:-}"
 PARENT_PID="${3:-$PPID}"
 
+# ── Log invocation ───────────────────────────────────────────────────────────
+LOG_FILE="${CLAUDE_PAGER_LOG:-}"
+if [[ -n "$LOG_FILE" ]]; then
+    printf '%s pager-setup.sh file=%s editor_pid=%s parent_pid=%s\n' \
+        "$(date)" "$FILE" "$EDITOR_PID" "$PARENT_PID" >> "$LOG_FILE"
+fi
+
 # ── Resolve REPO_DIR ──────────────────────────────────────────────────────────
 _link="${BASH_SOURCE[0]}"
 while [[ -L "$_link" ]]; do

@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 dist/
 *.egg-info/
+
+# C build artifacts
+*.o
+bin/claude-pager-open

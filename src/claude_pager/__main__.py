@@ -91,8 +91,8 @@ def main(argv: list[str] | None = None) -> None:
 
     signal.signal(signal.SIGWINCH, _on_sigwinch)
 
-    # Let Claude Code draw its "Save and close editor..." message first
-    time.sleep(0.3)
+    # No sleep — the C launcher handles timing.  Claude Code's "Save and
+    # close editor…" message is already drawn by the time Python starts.
 
     if not path or not os.path.exists(path):
         sys.stdout.write("\033[2J\033[H")

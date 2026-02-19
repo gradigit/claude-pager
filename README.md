@@ -1,93 +1,72 @@
 # claude-pager
 
-A scrollable terminal pager for Claude Code session transcripts. When you press **Ctrl-G** in Claude Code, this tool renders your conversation history in the terminal while your GUI editor is open.
+A scrollable terminal pager for Claude Code session transcripts. Press **Ctrl-G** in Claude Code and your conversation history renders in the terminal while your GUI editor is open.
+
+The pager is a single compiled C binary — no Python, no Node, no runtime dependencies. Full transcript render in ~5ms.
 
 ## Features
 
 - Scrollable viewport with mouse wheel and keyboard navigation
-- Markdown rendering with headings, lists, code blocks, bold/italic
-- OSC-8 hyperlinks (Cmd+clickable file paths and URLs in supported terminals)
+- Markdown rendering: headings, bold, inline code, code blocks, lists
 - Diff coloring (+green / -red / @@cyan)
-- Syntax highlighting via Pygments (optional)
 - Context usage bar showing token consumption
 - Live-follow mode: content updates as the transcript grows
 - Terminal resize support (SIGWINCH)
+- TurboDraft fast path: talks directly to TurboDraft's Unix socket, bypassing all shell overhead
 
 ## Requirements
 
-- Python 3.9+
-- macOS or Linux
-- A GUI editor for Claude Code's Ctrl-G feature (e.g. TurboDraft)
+- macOS (arm64 or x86_64)
+- A GUI editor for Claude Code's Ctrl-G feature
 
 ## Install
 
-```sh
-pip install claude-pager
-```
-
-For syntax highlighting in code blocks:
+### Option A: Use a pre-built binary (macOS arm64)
 
 ```sh
-pip install 'claude-pager[highlighting]'
+curl -L https://github.com/gradigit/claude-pager/releases/latest/download/claude-pager-open-arm64 \
+  -o /usr/local/bin/claude-pager-open
+chmod +x /usr/local/bin/claude-pager-open
 ```
 
-Or install from source:
+### Option B: Build from source
 
 ```sh
 git clone https://github.com/gradigit/claude-pager.git
-cd claude-pager
-pip install -e '.[highlighting]'
+cd claude-pager/bin
+make
 ```
+
+This produces `bin/claude-pager-open` (~70KB, zero dependencies).
 
 ## Claude Code Setup
 
-### 1. Configure the editor
+### 1. Point your editor to the binary
 
-**TurboDraft users (recommended):** use the compiled C binary for zero-overhead editor launch:
+Create or edit `~/.claude/editor-shim.sh`:
 
 ```sh
-cd /path/to/claude-pager/bin && make
+#!/usr/bin/env bash
+exec /path/to/claude-pager-open "$@"
 ```
 
-Then set Claude Code's editor to the binary:
+Then set it as your editor in your shell config:
 
-```json
-{
-  "editor": "/path/to/claude-pager/bin/claude-pager-open"
-}
+```sh
+# fish
+set -gx VISUAL ~/.claude/editor-shim.sh
+set -gx EDITOR ~/.claude/editor-shim.sh
+
+# bash/zsh
+export VISUAL=~/.claude/editor-shim.sh
+export EDITOR=~/.claude/editor-shim.sh
 ```
 
-`claude-pager-open` talks directly to TurboDraft's Unix socket, bypassing the bash shim (~25 ms), `turbodraft-editor`'s osascript (~234 ms), and `turbodraft-open` startup (~5 ms). Total savings: ~264 ms.
+### 2. Install the session hook
 
-**Other editors:** use the bash shim:
+The included hook ensures the pager finds the correct transcript, even with multiple Claude sessions.
 
-```json
-{
-  "editor": "/path/to/claude-pager/shim/claude-pager-shim.sh"
-}
-```
-
-Both approaches launch the editor immediately and start the pager in the background.
-
-### 2. Set your GUI editor
-
-Set `CLAUDE_PAGER_EDITOR` in Claude Code's `env` settings:
-
-```json
-{
-  "env": {
-    "CLAUDE_PAGER_EDITOR": "turbodraft-editor"
-  }
-}
-```
-
-The bash shim also falls back to `$VISUAL` / `$EDITOR` if `CLAUDE_PAGER_EDITOR` is unset. `claude-pager-open` uses TurboDraft's socket directly and does not need this variable.
-
-### 3. Install the session hook (recommended)
-
-The included `save-session-transcript.sh` hook ensures the pager always finds the correct transcript, even with multiple Claude sessions:
-
-Add to your Claude Code settings under `hooks.SessionStart`:
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -104,6 +83,33 @@ Add to your Claude Code settings under `hooks.SessionStart`:
 
 Without this hook, the pager falls back to finding the most recent transcript in your project directory.
 
+### 3. TurboDraft users
+
+No extra configuration needed. The binary detects TurboDraft's Unix socket at `~/Library/Application Support/TurboDraft/turbodraft.sock` and talks to it directly — no osascript, no `turbodraft-open`, no shell overhead.
+
+If TurboDraft is not running, it falls back to the bash shim (`shim/claude-pager-shim.sh`) which works with any GUI editor.
+
+### Other editors (VS Code, Sublime, etc.)
+
+Set `CLAUDE_PAGER_EDITOR` in Claude Code's env settings:
+
+```json
+{
+  "env": {
+    "CLAUDE_PAGER_EDITOR": "code -w"
+  }
+}
+```
+
+The bash shim (`shim/claude-pager-shim.sh`) launches your editor and starts the Python pager in the background. To use the bash shim directly instead of the C binary, point your editor shim at it:
+
+```sh
+#!/usr/bin/env bash
+exec /path/to/claude-pager/shim/claude-pager-shim.sh "$@"
+```
+
+The bash shim requires Python 3.9+ and `pip install claude-pager`.
+
 ## Key Bindings
 
 | Key | Action |
@@ -113,51 +119,47 @@ Without this hook, the pager falls back to finding the most recent transcript in
 | Page Up/Down | Scroll one page |
 | Home | Jump to top |
 | End | Jump to bottom |
-
-## Configuration
-
-| Environment Variable | Description |
-|---|---|
-| `CLAUDE_PAGER_EDITOR` | Path to your GUI editor (used by the bash shim) |
-| `CLAUDE_PAGER_LOG` | Write debug logs to this file path |
-
-CLI options (when running standalone):
-
-```
-claude-pager [transcript.jsonl] [editor_pid] [--ctx-limit TOKENS] [--log-file PATH]
-```
+| q | Quit pager |
 
 ## How It Works
 
-**With `claude-pager-open` (TurboDraft):**
+When you press Ctrl-G in Claude Code:
 
-1. Claude Code spawns `claude-pager-open`
-2. The binary connects to TurboDraft's Unix socket (~0 ms) and sends a `session.open` request
-3. TurboDraft opens the file immediately — no bash, no osascript, no extra process spawning
-4. The binary forks `pager-setup.sh` in the background to find the transcript and start the pager
-5. The binary blocks on `session.wait` until TurboDraft closes the session
-6. On close: the pager is terminated and the binary exits
-
-**With `claude-pager-shim.sh` (other editors):**
-
-1. Claude Code opens the alt screen and spawns the bash shim
-2. The shim launches your GUI editor immediately, then starts the pager in the background
-3. The shim finds the current session's transcript via:
-   - TTY-keyed file written by the SessionStart hook
-   - PWD-derived project directory lookup
-   - Globally most recent transcript (last resort)
-4. The pager renders the transcript in the terminal with scrolling support
-5. When you close the editor, the pager exits and Claude Code restores the main screen
+1. Claude Code opens an alt screen and spawns the editor shim
+2. The C binary finds your session transcript via a tty-keyed temp file (~0.1ms)
+3. It connects to TurboDraft's socket and sends `session.open` (~0.02ms)
+4. It forks and renders the pager directly in C (~3ms for pre-render, ~5ms for full transcript)
+5. TurboDraft opens the file (~120-180ms) — the pager is already visible
+6. On close: the binary receives `session.wait` response, kills the pager, and exits
 
 The pager uses alternate scroll mode (`\033[?1007h`) instead of mouse tracking, so OSC-8 hyperlinks remain Cmd+clickable.
+
+## Architecture
+
+```
+claude-pager-open (C binary, ~70KB)
+├── TurboDraft socket client (JSON-RPC 2.0 over Unix domain socket)
+├── Transcript parser (minimal JSON scanner, single-pass JSONL)
+├── Markdown renderer (ANSI escape codes)
+├── Scrollable viewport (raw terminal mode, keyboard/mouse input)
+└── Fallback: shim/claude-pager-shim.sh (bash + Python, for non-TurboDraft editors)
+```
 
 ## Development
 
 ```sh
 git clone https://github.com/gradigit/claude-pager.git
-cd claude-pager
+cd claude-pager/bin
+make            # builds claude-pager-open
+make clean      # removes build artifacts
+```
+
+The C source is in `bin/claude-pager-open.c` (socket + fork logic) and `bin/pager.c` (pager rendering).
+
+The Python pager (`src/claude_pager/`) is used by the bash shim fallback path:
+
+```sh
 pip install -e '.[highlighting]'
-python -m pytest
 ```
 
 ## License
