@@ -1,14 +1,8 @@
 /*
- * claude-pager-open — zero-overhead editor shim for Claude Code
+ * claude-pager-open — editor shim for Claude Code with built-in pager
  *
- * Talks directly to TurboDraft's Unix socket and launches the pager
- * without any shell intermediaries.
- *
- * Bypasses:
- *   - bash shim startup           (~25 ms)
- *   - turbodraft-editor osascript (~234 ms)
- *   - turbodraft-open binary       (~5 ms)
- *   - pager-setup.sh bash          (~25 ms)
+ * Works with any GUI editor.  Detects TurboDraft's Unix socket for
+ * zero-overhead launch; falls back to CLAUDE_PAGER_EDITOR / VISUAL / EDITOR.
  *
  * Build: cd bin && make
  */
@@ -20,10 +14,12 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 
 #include "pager.h"
 
@@ -31,7 +27,24 @@
 #include <mach-o/dyld.h>
 #endif
 
-/* ── Helpers ───────────────────────────────────────────────────────────────── */
+/* ── Debug logging ─────────────────────────────────────────────────────────── */
+
+static FILE *dbg;
+static struct timeval t0;
+static void dbg_open(void) {
+    gettimeofday(&t0, NULL);
+    dbg = fopen("/tmp/claude-pager-open.log", "a");
+    if (dbg) setbuf(dbg, NULL);
+}
+static double elapsed_ms(void) {
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    return (now.tv_sec - t0.tv_sec) * 1000.0 +
+           (now.tv_usec - t0.tv_usec) / 1000.0;
+}
+#define DBG(...) do { if (dbg) { fprintf(dbg, "[%7.2fms] ", elapsed_ms()); fprintf(dbg, __VA_ARGS__); } } while(0)
+
+/* ── Socket helpers ────────────────────────────────────────────────────────── */
 
 static int write_all(int fd, const char *buf, size_t len) {
     size_t sent = 0;
@@ -109,7 +122,6 @@ static void json_escape_path(const char *src, char *dst, size_t dstlen) {
 
 /* ── Transcript finding (pure C, no process spawns) ────────────────────────── */
 
-/* Find newest .jsonl in a directory */
 static int newest_jsonl(const char *dir, char *out, size_t outlen) {
     DIR *d = opendir(dir);
     if (!d) return -1;
@@ -136,14 +148,11 @@ static int newest_jsonl(const char *dir, char *out, size_t outlen) {
 static void find_transcript(const char *home, char *out, size_t outlen) {
     out[0] = '\0';
 
-    /* Strategy 1: tty-keyed file from SessionStart hook.
-     * Our tty == Claude Code's tty (we're a direct child). */
+    /* Strategy 1: tty-keyed file from SessionStart hook */
     char *tty = ttyname(STDIN_FILENO);
     if (tty) {
-        /* ttyname returns "/dev/ttys003", hook uses "ttys003" (from ps -o tty=) */
         const char *key = tty;
         if (strncmp(key, "/dev/", 5) == 0) key += 5;
-
         char path[256];
         snprintf(path, sizeof(path), "/tmp/claude-transcript-%s", key);
         FILE *f = fopen(path, "r");
@@ -163,11 +172,9 @@ static void find_transcript(const char *home, char *out, size_t outlen) {
     if (pwd) {
         char project_key[1024];
         size_t ki = 0;
-        for (const char *p = pwd; *p && ki + 1 < sizeof(project_key); p++) {
+        for (const char *p = pwd; *p && ki + 1 < sizeof(project_key); p++)
             project_key[ki++] = (*p == '/') ? '-' : *p;
-        }
         project_key[ki] = '\0';
-
         char project_dir[2048];
         snprintf(project_dir, sizeof(project_dir),
                  "%s/.claude/projects/%s", home, project_key);
@@ -198,99 +205,165 @@ static void find_transcript(const char *home, char *out, size_t outlen) {
     closedir(pd);
 }
 
-/* ── Pre-render: instant initial frame before Python starts ────────────────── */
+/* ── Pre-render: instant initial frame ─────────────────────────────────────── */
 
 static void pre_render(int tty_fd) {
-    /* Get terminal size */
     struct winsize ws = {0};
     if (ioctl(tty_fd, TIOCGWINSZ, &ws) < 0 || ws.ws_col == 0) {
-        ws.ws_col = 100;
-        ws.ws_row = 24;
+        ws.ws_col = 100; ws.ws_row = 24;
     }
     int cols = ws.ws_col < 120 ? ws.ws_col : 120;
 
-    /* Build frame in a buffer for a single write(2) call */
     char buf[16384];
     int pos = 0;
-
-    /* Clear screen + home */
-    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "\033[2J\033[H");
-
-    /* Top separator */
-    for (int i = 0; i < cols && pos + 4 < (int)sizeof(buf); i++)
-        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "\033[38;2;80;80;80m\xe2\x94\x80");
-    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "\033[0m\n");
-
-    /* Blank content area */
-    for (int r = 0; r < (int)ws.ws_row - 4 && pos + 2 < (int)sizeof(buf); r++)
+    pos += snprintf(buf+pos, sizeof(buf)-(size_t)pos, "\033[2J\033[H");
+    for (int i = 0; i < cols && pos+4 < (int)sizeof(buf); i++)
+        pos += snprintf(buf+pos, sizeof(buf)-(size_t)pos, "\033[38;2;80;80;80m\xe2\x94\x80");
+    pos += snprintf(buf+pos, sizeof(buf)-(size_t)pos, "\033[0m\n");
+    for (int r = 0; r < (int)ws.ws_row - 4 && pos+2 < (int)sizeof(buf); r++)
         buf[pos++] = '\n';
-
-    /* Bottom separator */
-    for (int i = 0; i < cols && pos + 4 < (int)sizeof(buf); i++)
-        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "\033[38;2;80;80;80m\xe2\x94\x80");
-    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "\033[0m\n");
-
-    /* Status bar */
-    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+    for (int i = 0; i < cols && pos+4 < (int)sizeof(buf); i++)
+        pos += snprintf(buf+pos, sizeof(buf)-(size_t)pos, "\033[38;2;80;80;80m\xe2\x94\x80");
+    pos += snprintf(buf+pos, sizeof(buf)-(size_t)pos, "\033[0m\n");
+    pos += snprintf(buf+pos, sizeof(buf)-(size_t)pos,
         "\033[1;33m  Editor open \xe2\x80\x94 edit and close to send\033[0m");
-
-    /* Single write — atomic, appears instantly */
     (void)write(tty_fd, buf, (size_t)pos);
 }
 
-/* ── Fallback: exec the bash shim ──────────────────────────────────────────── */
+/* ── Fork pager child ──────────────────────────────────────────────────────── */
 
-static void get_self_dir(char *out, size_t outlen) {
-    out[0] = '\0';
-#ifdef __APPLE__
-    char buf[1024];
-    uint32_t buflen = sizeof(buf);
-    if (_NSGetExecutablePath(buf, &buflen) == 0) {
-        char resolved[1024];
-        if (realpath(buf, resolved)) {
-            char *slash = strrchr(resolved, '/');
-            if (slash && (size_t)(slash - resolved) < outlen) {
-                memcpy(out, resolved, (size_t)(slash - resolved));
-                out[slash - resolved] = '\0';
-                return;
-            }
+static pid_t fork_pager(const char *transcript, int watch_pid) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        int tty_fd = open("/dev/tty", O_RDWR);
+        if (tty_fd >= 0) {
+            pre_render(tty_fd);
+            run_pager(tty_fd, transcript, watch_pid, 200000);
+            close(tty_fd);
         }
+        _exit(0);
     }
-#endif
-    strncpy(out, "/usr/local/bin", outlen - 1);
-    out[outlen - 1] = '\0';
+    return pid;
 }
 
-static void fallback(const char *file) {
-    char self_dir[1024];
-    get_self_dir(self_dir, sizeof(self_dir));
-    char shim[2048];
-    snprintf(shim, sizeof(shim), "%s/../shim/claude-pager-shim.sh", self_dir);
-    execl("/bin/bash", "bash", shim, file, (char *)NULL);
+/* ── TurboDraft fast path ──────────────────────────────────────────────────── */
+
+static int turbodraft_path(const char *home, const char *file,
+                           const char *transcript) {
+    char sock_path[512];
+    snprintf(sock_path, sizeof(sock_path),
+             "%s/Library/Application Support/TurboDraft/turbodraft.sock", home);
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        DBG("turbodraft socket connect failed: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    DBG("turbodraft socket connected\n");
+
+    /* Send session.open */
+    char escaped[2048];
+    json_escape_path(file, escaped, sizeof(escaped));
+    char open_msg[4096];
+    snprintf(open_msg, sizeof(open_msg),
+             "{\"jsonrpc\":\"2.0\",\"id\":1,"
+             "\"method\":\"turbodraft.session.open\","
+             "\"params\":{\"path\":\"%s\"}}", escaped);
+
+    if (send_msg(fd, open_msg) < 0) { close(fd); return -1; }
+    DBG("session.open sent\n");
+
+    /* Fork pager (runs in parallel with TurboDraft's ~120ms open) */
+    signal(SIGCHLD, SIG_IGN);
+    pid_t pager_pid = fork_pager(transcript, (int)getpid());
+    DBG("pager forked pid=%d\n", (int)pager_pid);
+
+    /* Read session.open response */
+    char *resp = recv_msg(fd);
+    if (!resp) { kill(pager_pid, SIGTERM); close(fd); return 1; }
+
+    char session_id[256] = "";
+    extract_str(resp, "sessionId", session_id, sizeof(session_id));
+    DBG("sessionId=%s\n", session_id[0] ? session_id : "(missing)");
+    free(resp);
+
+    if (!session_id[0]) { kill(pager_pid, SIGTERM); close(fd); return 1; }
+
+    /* Send session.wait — blocks until TurboDraft session ends */
+    char wait_msg[512];
+    snprintf(wait_msg, sizeof(wait_msg),
+             "{\"jsonrpc\":\"2.0\",\"id\":2,"
+             "\"method\":\"turbodraft.session.wait\","
+             "\"params\":{\"sessionId\":\"%s\",\"timeoutMs\":86400000}}",
+             session_id);
+
+    if (send_msg(fd, wait_msg) < 0) {
+        kill(pager_pid, SIGTERM); close(fd); return 0;
+    }
+
+    char *resp3 = recv_msg(fd);
+    if (resp3) free(resp3);
+    close(fd);
+
+    kill(pager_pid, SIGTERM);
+    return 0;
+}
+
+/* ── Generic editor path ───────────────────────────────────────────────────── */
+
+static int generic_editor_path(const char *file, const char *transcript) {
+    /* Resolve editor command */
+    const char *editor = getenv("CLAUDE_PAGER_EDITOR");
+    if (!editor || !editor[0]) editor = getenv("VISUAL");
+    if (!editor || !editor[0]) editor = getenv("EDITOR");
+
+    if (!editor || !editor[0]) {
+        DBG("no editor found, using system default\n");
 #ifdef __APPLE__
-    execlp("open", "open", "-W", file, (char *)NULL);
+        execlp("open", "open", "-W", "-t", file, (char *)NULL);
+#else
+        execlp("xdg-open", "xdg-open", file, (char *)NULL);
 #endif
-    _exit(1);
+        _exit(1);
+    }
+
+    DBG("editor=%s\n", editor);
+
+    /* Fork editor as child */
+    pid_t ed_pid = fork();
+    if (ed_pid == 0) {
+        /* Clear recursion guard so the editor doesn't hit it */
+        unsetenv("_CLAUDE_PAGER_ACTIVE");
+        char cmd[4096];
+        snprintf(cmd, sizeof(cmd), "exec %s \"$1\"", editor);
+        execl("/bin/sh", "sh", "-c", cmd, "sh", file, (char *)NULL);
+        _exit(127);
+    }
+    DBG("editor forked pid=%d\n", (int)ed_pid);
+
+    /* Fork pager — watches editor PID */
+    pid_t pager_pid = fork_pager(transcript, (int)ed_pid);
+    DBG("pager forked pid=%d\n", (int)pager_pid);
+
+    /* Wait for editor to close */
+    int status;
+    waitpid(ed_pid, &status, 0);
+    DBG("editor exited status=%d\n", status);
+
+    /* Kill pager */
+    if (pager_pid > 0) kill(pager_pid, SIGTERM);
+    return 0;
 }
 
 /* ── main ──────────────────────────────────────────────────────────────────── */
-
-/* ── Debug logging (always writes to /tmp/claude-pager-open.log) ───────── */
-#include <sys/time.h>
-static FILE *dbg;
-static struct timeval t0;
-static void dbg_open(void) {
-    gettimeofday(&t0, NULL);
-    dbg = fopen("/tmp/claude-pager-open.log", "a");
-    if (dbg) setbuf(dbg, NULL);
-}
-static double elapsed_ms(void) {
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    return (now.tv_sec - t0.tv_sec) * 1000.0 +
-           (now.tv_usec - t0.tv_usec) / 1000.0;
-}
-#define DBG(...) do { if (dbg) { fprintf(dbg, "[%7.2fms] ", elapsed_ms()); fprintf(dbg, __VA_ARGS__); } } while(0)
 
 int main(int argc, char *argv[]) {
     dbg_open();
@@ -301,102 +374,37 @@ int main(int argc, char *argv[]) {
     const char *file = argv[1];
     const char *home = getenv("HOME");
     DBG("--- claude-pager-open pid=%d file=%s\n", (int)getpid(), file);
-    if (!home) { DBG("no HOME, fallback\n"); fallback(file); }
 
-    signal(SIGCHLD, SIG_IGN);
+    if (!home) {
+#ifdef __APPLE__
+        execlp("open", "open", "-W", "-t", file, (char *)NULL);
+#endif
+        _exit(1);
+    }
 
-    /* ── Pre-compute transcript path (pure syscalls, ~0.1 ms) ──────────── */
+    /* Recursion guard: if VISUAL/EDITOR points to our shim, we'd loop.
+     * Detect this and open with system default instead. */
+    if (getenv("_CLAUDE_PAGER_ACTIVE")) {
+        DBG("recursion detected, opening with system default\n");
+#ifdef __APPLE__
+        execlp("open", "open", "-W", "-t", file, (char *)NULL);
+#else
+        execlp("xdg-open", "xdg-open", file, (char *)NULL);
+#endif
+        _exit(1);
+    }
+    setenv("_CLAUDE_PAGER_ACTIVE", "1", 1);
+
+    /* Pre-compute transcript path */
     char transcript[2048] = "";
     find_transcript(home, transcript, sizeof(transcript));
     DBG("transcript=%s\n", transcript[0] ? transcript : "(none)");
 
-    /* ── Connect to TurboDraft socket ──────────────────────────────────── */
-    char sock_path[512];
-    snprintf(sock_path, sizeof(sock_path),
-             "%s/Library/Application Support/TurboDraft/turbodraft.sock", home);
+    /* Try TurboDraft fast path first */
+    int rc = turbodraft_path(home, file, transcript);
+    if (rc >= 0) return rc;
 
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) fallback(file);
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        DBG("socket connect failed: %s\n", strerror(errno));
-        close(fd);
-        fallback(file);
-    }
-    DBG("socket connected\n");
-
-    /* ── Send session.open ─────────────────────────────────────────────── */
-    char escaped[2048];
-    json_escape_path(file, escaped, sizeof(escaped));
-    char open_msg[4096];
-    snprintf(open_msg, sizeof(open_msg),
-             "{\"jsonrpc\":\"2.0\",\"id\":1,"
-             "\"method\":\"turbodraft.session.open\","
-             "\"params\":{\"path\":\"%s\"}}", escaped);
-
-    if (send_msg(fd, open_msg) < 0) { DBG("send session.open failed\n"); close(fd); fallback(file); }
-    DBG("session.open sent\n");
-
-    /* ── Fork pager immediately ────────────────────────────────────────
-     * Child runs the C pager directly (no exec, no Python).
-     * Runs in parallel with TurboDraft's ~120 ms session.open.          */
-    int parent_pid = (int)getpid();
-
-    pid_t pager_pid = fork();
-    DBG("fork returned %d\n", (int)pager_pid);
-    if (pager_pid == 0) {
-        close(fd);
-        int tty_fd = open("/dev/tty", O_RDWR);
-        if (tty_fd >= 0) {
-            /* Pre-render an initial frame (~0.1ms) before full render */
-            pre_render(tty_fd);
-            DBG("child: run_pager transcript=%s parent=%d\n",
-                transcript[0] ? transcript : "(none)", parent_pid);
-            run_pager(tty_fd, transcript, parent_pid, 200000);
-            close(tty_fd);
-        }
-        _exit(0);
-    }
-
-    /* ── Read session.open response ────────────────────────────────────── */
-    char *resp = recv_msg(fd);
-    if (!resp) { kill(pager_pid, SIGTERM); close(fd); return 1; }
-
-    char session_id[256] = "";
-    extract_str(resp, "sessionId", session_id, sizeof(session_id));
-    DBG("session.open resp: sessionId=%s\n", session_id[0] ? session_id : "(missing)");
-    DBG("raw resp: %s\n", resp);
-    free(resp);
-
-    if (!session_id[0]) {
-        DBG("no sessionId, killing pager and exiting\n");
-        kill(pager_pid, SIGTERM); close(fd); return 1;
-    }
-
-    /* ── Send session.wait ─────────────────────────────────────────────── */
-    char wait_msg[512];
-    snprintf(wait_msg, sizeof(wait_msg),
-             "{\"jsonrpc\":\"2.0\",\"id\":2,"
-             "\"method\":\"turbodraft.session.wait\","
-             "\"params\":{\"sessionId\":\"%s\",\"timeoutMs\":86400000}}",
-             session_id);
-
-    if (send_msg(fd, wait_msg) < 0) {
-        if (pager_pid > 0) kill(pager_pid, SIGTERM);
-        close(fd);
-        return 0;
-    }
-
-    /* Blocks until TurboDraft session ends */
-    char *resp3 = recv_msg(fd);
-    if (resp3) free(resp3);
-    close(fd);
-
-    if (pager_pid > 0) kill(pager_pid, SIGTERM);
-    return 0;
+    /* TurboDraft unavailable — use generic editor path */
+    DBG("turbodraft unavailable, using generic editor\n");
+    return generic_editor_path(file, transcript);
 }
