@@ -74,12 +74,10 @@ def inline_md(text: str) -> str:
         content = m.group(1)
         if content.startswith("/") and len(content) > 3:
             return CODE_INLINE + osc8_file(content) + R + ASST_TEXT
-        if content.startswith("http"):
-            return CODE_INLINE + osc8_url(content) + R + ASST_TEXT
         return CODE_INLINE + content + R + ASST_TEXT
 
     text = re.sub(r"`([^`\n]+)`", code_replace, text)
-    text = _URL_RE.sub(lambda m: osc8_url(m.group(1)), text)
+    text = _URL_RE.sub(lambda m: osc8_url(m.group(1)) + ASST_TEXT, text)
     return text
 
 
@@ -190,7 +188,7 @@ def render_items(items: list[tuple[str, ...]]) -> str:
             else:
                 linked = label
             if linked:
-                out.append(f"{TOOL_NAME}\u23fa {B}{name}{R}{TOOL_NAME}({linked}){R}")
+                out.append(f"{TOOL_NAME}\u23fa {B}{name}{R}{TOOL_NAME}({linked}{TOOL_NAME}){R}")
             else:
                 out.append(f"{TOOL_NAME}\u23fa {B}{name}{R}")
 

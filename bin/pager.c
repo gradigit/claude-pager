@@ -219,7 +219,13 @@ static int vlen(const char *s) {
         if (*s == '\033') {
             s++;
             if (*s=='[') { s++; while (*s && !isalpha((unsigned char)*s) && *s!='~') s++; if (*s) s++; }
-            else if (*s==']') { while (*s && *s!='\a') s++; if (*s) s++; }
+            else if (*s==']') {
+                while (*s) {
+                    if (*s=='\a') { s++; break; }
+                    if (s[0]=='\033' && s[1]=='\\') { s+=2; break; }
+                    s++;
+                }
+            }
             else if (*s) s++;
         } else { n++; s++; }
     }
@@ -230,6 +236,138 @@ static void L_pushw(Lines *l, const char *s) {
     L_push(l, s);
     int v = vlen(s);
     if (v > g_cols) { int extra = (v + g_cols - 1) / g_cols - 1; for (int i=0; i<extra; i++) L_push(l, ""); }
+}
+
+/* ── OSC-8 linkification ──────────────────────────────────────────────── */
+
+static int is_urlch(char c) {
+    if (c <= ' ') return 0;
+    if (c=='<'||c=='>'||c=='"'||c=='\''||c=='\\'||c==')'||c=='}'||c==']') return 0;
+    return 1;
+}
+
+static int is_pathch(char c) {
+    return (c>='a'&&c<='z') || (c>='A'&&c<='Z') ||
+           (c>='0'&&c<='9') || c=='_' || c=='.' || c=='-' || c=='/';
+}
+
+static int g_lstyle = 0;
+
+static void lf_style_on(char *dst, int dstmax, int *o) {
+    const char *s;
+    switch (g_lstyle++ % 4) {
+    case 0:  s = "\033\\\033[4m"; break;                          /* A: standard underline */
+    case 1:  s = "\033\\\033[4;58;2;100;180;255m"; break;        /* B: blue colored underline */
+    case 2:  s = "\033\\\033[4:3;58;2;255;165;0m"; break;        /* C: wavy orange underline */
+    default: s = "\033\\\033[4:4;58;2;100;220;100m"; break;      /* D: dotted green underline */
+    }
+    while (*s && *o < dstmax-1) dst[(*o)++] = *s++;
+}
+
+static void lf_style_off(char *dst, int dstmax, int *o, int style) {
+    const char *s;
+    switch (style % 4) {
+    case 0:  s = "\033[24m\033]8;;\033\\"; break;
+    case 1:  s = "\033[24;59m\033]8;;\033\\"; break;
+    default: s = "\033[4:0;59m\033]8;;\033\\"; break;
+    }
+    while (*s && *o < dstmax-1) dst[(*o)++] = *s++;
+}
+
+static void linkify(char *dst, int dstmax, const char *src) {
+    int o = 0;
+    const char *p = src;
+
+    #define LF_CH(ch)  do { if (o < dstmax-1) dst[o++] = (ch); } while(0)
+    #define LF_S(s)    do { const char *_s=(s); while(*_s && o<dstmax-1) dst[o++]=*_s++; } while(0)
+
+    while (*p && o < dstmax - 200) {
+        /* Pass through ANSI CSI sequences */
+        if (p[0]=='\033' && p[1]=='[') {
+            LF_CH(*p++); LF_CH(*p++);
+            while (*p && !isalpha((unsigned char)*p) && *p!='~') LF_CH(*p++);
+            if (*p) LF_CH(*p++);
+            continue;
+        }
+        /* Pass through existing OSC-8 sequences */
+        if (p[0]=='\033' && p[1]==']' && p[2]=='8' && p[3]==';') {
+            while (*p) {
+                if (*p=='\a') { LF_CH(*p++); break; }
+                if (p[0]=='\033' && p[1]=='\\') { LF_CH(*p++); LF_CH(*p++); break; }
+                LF_CH(*p++);
+            }
+            continue;
+        }
+        /* Pass through other OSC sequences */
+        if (p[0]=='\033' && p[1]==']') {
+            while (*p) {
+                if (*p=='\a') { LF_CH(*p++); break; }
+                if (p[0]=='\033' && p[1]=='\\') { LF_CH(*p++); LF_CH(*p++); break; }
+                LF_CH(*p++);
+            }
+            continue;
+        }
+        /* Pass through other ESC sequences */
+        if (p[0]=='\033') {
+            LF_CH(*p++);
+            if (*p) LF_CH(*p++);
+            continue;
+        }
+        /* Detect URL */
+        if (strncmp(p,"http://",7)==0 || strncmp(p,"https://",8)==0) {
+            const char *start = p;
+            while (*p && is_urlch(*p)) p++;
+            while (p>start && (p[-1]=='.'||p[-1]==','||p[-1]==';'||p[-1]==':')) p--;
+            int ulen = (int)(p - start);
+            if (ulen > 10 && o + ulen*2 + 80 < dstmax) {
+                int sty = g_lstyle;
+                LF_S("\033]8;;");
+                for (int i=0; i<ulen; i++) LF_CH(start[i]);
+                lf_style_on(dst, dstmax, &o);
+                for (int i=0; i<ulen; i++) LF_CH(start[i]);
+                lf_style_off(dst, dstmax, &o, sty);
+            } else {
+                for (int i=0; i<ulen; i++) LF_CH(start[i]);
+            }
+            continue;
+        }
+        /* Detect file path: /segment/segment... */
+        if (p[0]=='/' && is_pathch(p[1])) {
+            const char *start = p;
+            const char *sp = p + 1;
+            while (*sp && is_pathch(*sp)) sp++;
+            int has_slash = 0;
+            for (const char *c=start+1; c<sp; c++) { if (*c=='/') { has_slash=1; break; } }
+            if (has_slash && (sp-start) >= 3) {
+                p = sp;
+                while (p>start+1 && (p[-1]=='.'||p[-1]==',')) p--;
+                int plen = (int)(p - start);
+                if (o + plen*2 + 100 < dstmax) {
+                    int sty = g_lstyle;
+                    LF_S("\033]8;;file://");
+                    for (int i=0; i<plen; i++) LF_CH(start[i]);
+                    lf_style_on(dst, dstmax, &o);
+                    for (int i=0; i<plen; i++) LF_CH(start[i]);
+                    lf_style_off(dst, dstmax, &o, sty);
+                } else {
+                    for (int i=0; i<plen; i++) LF_CH(start[i]);
+                }
+                continue;
+            }
+        }
+        LF_CH(*p++);
+    }
+    while (*p && o < dstmax-1) dst[o++] = *p++;
+    dst[o] = '\0';
+
+    #undef LF_CH
+    #undef LF_S
+}
+
+static void L_pushw_link(Lines *l, const char *s) {
+    char lb[32768];
+    linkify(lb, sizeof(lb), s);
+    L_pushw(l, lb);
 }
 
 /* ── Transcript items ──────────────────────────────────────────────────── */
@@ -249,7 +387,7 @@ static void I_free(Items *it) {
     free(it->d); memset(it, 0, sizeof(*it));
 }
 
-/* Strip ANSI from text */
+/* Strip ANSI from text (preserves OSC-8 hyperlinks) */
 static char *sanitize(const char *s) {
     int len = (int)strlen(s);
     char *d = malloc(len + 1);
@@ -258,7 +396,21 @@ static char *sanitize(const char *s) {
         if (s[i]=='\033') {
             i++;
             if (i<len && s[i]=='[') { i++; while (i<len && !isalpha((unsigned char)s[i])) i++; if (i<len) i++; }
-            else if (i<len && s[i]==']') { while (i<len && s[i]!='\a') i++; if (i<len) i++; }
+            else if (i+2<len && s[i]==']' && s[i+1]=='8' && s[i+2]==';') {
+                d[j++] = '\033';
+                while (i<len) {
+                    if (s[i]=='\a') { d[j++]=s[i++]; break; }
+                    if (i+1<len && s[i]=='\033' && s[i+1]=='\\') { d[j++]=s[i++]; d[j++]=s[i++]; break; }
+                    d[j++] = s[i++];
+                }
+            }
+            else if (i<len && s[i]==']') {
+                while (i<len) {
+                    if (s[i]=='\a') { i++; break; }
+                    if (i+1<len && s[i]=='\033' && s[i+1]=='\\') { i+=2; break; }
+                    i++;
+                }
+            }
             else if (i<len) i++;
         } else { d[j++] = s[i++]; }
     }
@@ -450,7 +602,7 @@ static void render_md(Lines *L, const char *text) {
             int vl = (int)strlen(lb), pad = g_cols-4-vl;
             if (pad<0) pad=0;
             snprintf(fb, sizeof(fb), C_CBG C_CFG "  %s%*s" RS, lb, pad, "");
-            L_pushw(L, fb); continue;
+            L_pushw_link(L, fb); continue;
         }
 
         /* Headers */
@@ -484,7 +636,7 @@ static void render_md(Lines *L, const char *text) {
             fmt_inline(fb, sizeof(fb), lb+ind+2);
             char ob2[16384];
             snprintf(ob2, sizeof(ob2), "%*s" C_AST BUL " %s" RS, ind, "", fb);
-            L_pushw(L, ob2); continue;
+            L_pushw_link(L, ob2); continue;
         }
 
         /* Numbered lists */
@@ -496,12 +648,12 @@ static void render_md(Lines *L, const char *text) {
                 fmt_inline(fb, sizeof(fb), d+2);
                 char ob2[16384];
                 snprintf(ob2, sizeof(ob2), C_AST "%s. %s" RS, num, fb);
-                L_pushw(L, ob2); continue;
+                L_pushw_link(L, ob2); continue;
             }
         }
 
         /* Default text */
-        if (lb[0]) { fmt_inline(fb, sizeof(fb), lb); L_pushw(L, fb); }
+        if (lb[0]) { fmt_inline(fb, sizeof(fb), lb); L_pushw_link(L, fb); }
         else L_push(L, "");
     }
 }
@@ -547,7 +699,7 @@ static void render_items(Lines *L, Items *items) {
                 int ll = eol ? (int)(eol-p) : (int)strlen(p);
                 if (ll>(int)sizeof(b)-30) ll=(int)sizeof(b)-31;
                 snprintf(b, sizeof(b), DI "%.*s" RS, ll, p);
-                L_pushw(L, b);
+                L_pushw_link(L, b);
                 p = eol ? eol+1 : p+ll;
             }
             if (nl > MX_HUM) {
@@ -587,7 +739,7 @@ static void render_items(Lines *L, Items *items) {
                     else if (p[0]=='@'&&p[1]=='@') lc=C_DFC;
                 }
                 snprintf(b, sizeof(b), "%s%s%.*s" RS, conn, lc, ll, p);
-                L_pushw(L, b);
+                L_pushw_link(L, b);
                 if (!eol) break;
                 p = eol+1;
             }
@@ -744,6 +896,7 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
                 tok = 0; pct = 0;
                 parse_transcript(transcript, &items, &tok, &pct, ctx_limit);
                 L_free(&L);
+                g_lstyle = 0;
                 render_items(&L, &items);
                 L_push(&L, C_HDM "  " HL HL HL " end of transcript " HL HL HL RS);
                 L_push(&L, ""); L_push(&L, "");
