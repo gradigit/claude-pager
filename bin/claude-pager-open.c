@@ -484,23 +484,46 @@ static int terminal_editor_path(const char *editor, const char *file) {
     _exit(127);
 }
 
-/* ── Generic editor path (GUI editor + pager) ──────────────────────────────── */
+/* ── Generic editor path (GUI editor + pager, with TUI auto-detection) ───── */
 
 static int generic_editor_path(const char *editor, const char *file) {
-    /* Fork editor as child */
+    /* Fork editor with stdin detached. TUI editors die immediately
+     * without a terminal; GUI editors don't read stdin and keep running.
+     * This auto-detects unknown TUI editors not in our list. */
     pid_t ed_pid = fork();
     if (ed_pid == 0) {
-        /* Keep _CLAUDE_PAGER_ACTIVE set so that if the resolved editor
-         * is claude-pager-open itself, it hits the recursion guard
-         * instead of fork-bombing. */
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
         char cmd[4096];
         snprintf(cmd, sizeof(cmd), "exec %s \"$1\"", editor);
         execl("/bin/sh", "sh", "-c", cmd, "sh", file, (char *)NULL);
         _exit(127);
     }
-    DBG("editor forked pid=%d\n", (int)ed_pid);
+    DBG("probe: editor forked pid=%d (stdin detached)\n", (int)ed_pid);
 
-    /* Fork pager — watches editor PID */
+    /* Grace period: TUI editors without a tty exit within ~30ms.
+     * GUI editors stay alive. Check every 10ms for 150ms. */
+    int probe_status;
+    int is_tui = 0;
+    for (int i = 0; i < 15; i++) {
+        usleep(10000);
+        if (waitpid(ed_pid, &probe_status, WNOHANG) > 0) {
+            DBG("probe: editor exited in %dms (status=%d) — TUI detected\n",
+                (i + 1) * 10, probe_status);
+            is_tui = 1;
+            break;
+        }
+    }
+
+    if (is_tui) {
+        /* Re-launch with a real terminal */
+        DBG("re-launching as TUI editor (exec with tty)\n");
+        return terminal_editor_path(editor, file);
+    }
+
+    /* Editor still running after 150ms — GUI confirmed.
+     * The probe child IS our editor process. Fork pager alongside. */
+    DBG("probe: editor alive after 150ms — GUI confirmed\n");
     pid_t pager_pid = fork_pager((int)ed_pid);
     DBG("pager forked pid=%d\n", (int)pager_pid);
 
