@@ -1,14 +1,14 @@
 # TODO
 
-## Editor-agnostic C binary
+## Deprecate Python pager and bash shims
 
-Redesign `bin/claude-pager-open.c` to work with any editor, not just TurboDraft:
+The C binary now handles everything end-to-end: editor resolution, TUI/GUI detection,
+pager rendering, and transcript finding. The following are dead code:
 
-1. Read `CLAUDE_PAGER_EDITOR` / `$VISUAL` / `$EDITOR` for the editor
-2. TUI editor detection (vim, nvim, nano, helix, emacs, etc.) → `exec` directly, no pager
-3. GUI editor → fork to background + fork pager-setup.sh + waitpid + kill pager
-4. TurboDraft fast path (optional): if editor looks like turbodraft and socket exists,
-   use socket protocol instead of fork+exec (skips osascript overhead)
+- `src/claude_pager/` — Python pager (replaced by `bin/pager.c`)
+- `shim/claude-pager-shim.sh` — bash editor shim (replaced by `bin/claude-pager-open.c`)
+- `shim/pager-setup.sh` — bash pager launcher (replaced by `fork_pager()` in C)
+- `pyproject.toml` — Python packaging config
+- `tests/` — Python tests
 
-This makes `claude-pager-open` the single entry point for all users.
-The bash shim (`claude-pager-shim.sh`) becomes redundant once this is done.
+Remove in a future PR after confirming no one depends on the Python entry point.

@@ -19,6 +19,7 @@ The pager is a single compiled C binary — no Python, no Node, no runtime depen
 
 - macOS (arm64 or x86_64)
 - A C compiler (Xcode Command Line Tools: `xcode-select --install`)
+- `jq` (installed automatically via Homebrew if missing)
 
 ## Install
 
@@ -28,7 +29,7 @@ The pager is a single compiled C binary — no Python, no Node, no runtime depen
 curl -sSL https://raw.githubusercontent.com/gradigit/claude-pager/main/install.sh | bash
 ```
 
-This clones the repo to `~/.claude-pager`, builds the binary, and creates the editor shim. Follow the printed instructions to set your `VISUAL`/`EDITOR` env vars.
+This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` in `~/.claude/settings.json`, and preserves your original editor as `env.CLAUDE_PAGER_EDITOR`. No shell config changes needed.
 
 ### AI agent install
 
@@ -46,26 +47,22 @@ This produces `bin/claude-pager-open` (~70KB, zero dependencies).
 
 ## Setup
 
-### 1. Point your editor to the binary
+The installer handles everything automatically. If you installed manually:
 
-Create or edit `~/.claude/editor-shim.sh`:
+### 1. Set the editor in settings.json
 
-```sh
-#!/usr/bin/env bash
-exec /path/to/claude-pager-open "$@"
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "editor": "/path/to/claude-pager-open",
+  "env": {
+    "CLAUDE_PAGER_EDITOR": "code --wait"
+  }
+}
 ```
 
-Then set it as your editor in your shell config:
-
-```sh
-# fish
-set -gx VISUAL ~/.claude/editor-shim.sh
-set -gx EDITOR ~/.claude/editor-shim.sh
-
-# bash/zsh
-export VISUAL=~/.claude/editor-shim.sh
-export EDITOR=~/.claude/editor-shim.sh
-```
+Claude Code sets `editor` as the binary it spawns on Ctrl-G, and exports `env` values as environment variables — so `CLAUDE_PAGER_EDITOR` is available to the binary via `getenv()`.
 
 ### 2. Install the session hook
 
@@ -88,22 +85,34 @@ Add to `~/.claude/settings.json`:
 
 Without this hook, the pager falls back to finding the most recent transcript in your project directory.
 
-### 3. Editor configuration
+## Switching Editors
 
-The binary works with any GUI editor out of the box:
-
-- **TurboDraft**: No extra config needed. The binary detects TurboDraft's Unix socket and talks to it directly — zero shell overhead.
-- **Other editors** (VS Code, Sublime, etc.): Set `CLAUDE_PAGER_EDITOR` in your environment or in Claude Code's env settings:
+Your editor is stored in `env.CLAUDE_PAGER_EDITOR` in `~/.claude/settings.json`. Change it to switch editors:
 
 ```json
 {
   "env": {
-    "CLAUDE_PAGER_EDITOR": "code -w"
+    "CLAUDE_PAGER_EDITOR": "cursor --wait"
   }
 }
 ```
 
-If no editor is configured, it falls back to `VISUAL`, then `EDITOR`, then macOS `open -W -t`.
+Common values:
+
+| Editor | Value |
+|---|---|
+| VS Code | `code --wait` |
+| Cursor | `cursor --wait` |
+| Zed | `zed --wait` |
+| Sublime Text | `subl --wait` |
+| Vim | `vim` |
+| Neovim | `nvim` |
+
+The resolution order is: `CLAUDE_PAGER_EDITOR` → `VISUAL` → `EDITOR` → system default (`open -W -t`).
+
+TUI editors (vim, nvim, emacs, nano, etc.) are exec'd directly without the pager. GUI editors are forked with the pager running alongside.
+
+You can force the path with `CLAUDE_PAGER_EDITOR_TYPE=tui` or `CLAUDE_PAGER_EDITOR_TYPE=gui` in the `env` section.
 
 ## Key Bindings
 
@@ -133,7 +142,8 @@ The pager uses alternate scroll mode (`\033[?1007h`) instead of mouse tracking, 
 
 ```
 claude-pager-open (C binary, ~70KB)
-├── Editor detection (CLAUDE_PAGER_EDITOR / VISUAL / EDITOR)
+├── Editor resolution (CLAUDE_PAGER_EDITOR → VISUAL → EDITOR → system default)
+├── TUI detection (exec directly for terminal editors, fork+pager for GUI)
 ├── TurboDraft socket client (JSON-RPC 2.0 over Unix domain socket)
 ├── Generic editor path (fork editor + fork pager + waitpid)
 ├── Transcript parser (minimal JSON scanner, single-pass JSONL)
@@ -144,13 +154,15 @@ claude-pager-open (C binary, ~70KB)
 
 ## Agent Instructions
 
-This section is for AI coding agents (Claude Code, Cursor, Copilot, etc.). Everything here is deterministic — no user input is needed. Detect the user's shell from `$SHELL` and proceed.
+This section is for AI coding agents (Claude Code, Cursor, Copilot, etc.). Everything here is deterministic — no user input is needed.
 
 ### 1. Check prerequisites
 
 ```sh
 # macOS required; ensure a C compiler is available
 xcode-select -p >/dev/null 2>&1 || xcode-select --install
+# jq required for settings.json manipulation
+command -v jq >/dev/null 2>&1 || brew install jq
 ```
 
 ### 2. Clone and build
@@ -162,58 +174,61 @@ make -C ~/.claude-pager/bin
 test -x ~/.claude-pager/bin/claude-pager-open
 ```
 
-### 3. Create editor shim
+### 3. Configure settings.json
 
-Write `~/.claude/editor-shim.sh`:
+Read `~/.claude/settings.json` (create with `{}` if missing). Use `jq` to:
+
+1. Save the current `editor` value as `env.CLAUDE_PAGER_EDITOR` (if it exists and isn't already claude-pager)
+2. Set `editor` to the binary path
+3. Add the session hook
 
 ```sh
-#!/usr/bin/env bash
-exec ~/.claude-pager/bin/claude-pager-open "$@"
+BINARY="$HOME/.claude-pager/bin/claude-pager-open"
+HOOK="$HOME/.claude-pager/shim/save-session-transcript.sh"
+SETTINGS="$HOME/.claude/settings.json"
+
+mkdir -p "$(dirname "$SETTINGS")"
+[[ -f "$SETTINGS" ]] || echo '{}' > "$SETTINGS"
+
+# Preserve old editor
+OLD=$(jq -r '.editor // empty' "$SETTINGS")
+if [[ -n "$OLD" && "$OLD" != *"claude-pager"* ]]; then
+    jq --arg ed "$OLD" '.env.CLAUDE_PAGER_EDITOR = $ed' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+fi
+
+# If no editor was preserved and none detected, find one
+if [[ -z "$(jq -r '.env.CLAUDE_PAGER_EDITOR // empty' "$SETTINGS")" ]]; then
+    for cmd in cursor code zed subl; do
+        if command -v "$cmd" &>/dev/null; then
+            jq --arg ed "$cmd --wait" '.env.CLAUDE_PAGER_EDITOR = $ed' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+            break
+        fi
+    done
+fi
+
+# Set editor to claude-pager-open
+jq --arg bin "$BINARY" '.editor = $bin' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+
+# Add session hook (if not already present)
+if ! jq -e '.hooks.SessionStart[]? | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
+    jq --arg cmd "$HOOK" '
+        .hooks.SessionStart = ((.hooks.SessionStart // []) + [{"type": "command", "command": $cmd}])
+    ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+fi
 ```
 
-Then `chmod +x ~/.claude/editor-shim.sh`.
+### 4. Done
 
-### 4. Set VISUAL and EDITOR
-
-Detect the user's shell from `$SHELL` and append to the appropriate config file:
-
-| Shell | Config file | Lines to add |
-|---|---|---|
-| fish | `~/.config/fish/config.fish` | `set -gx VISUAL ~/.claude/editor-shim.sh` and `set -gx EDITOR ~/.claude/editor-shim.sh` |
-| zsh | `~/.zshrc` | `export VISUAL=~/.claude/editor-shim.sh` and `export EDITOR=~/.claude/editor-shim.sh` |
-| bash | `~/.bashrc` | `export VISUAL=~/.claude/editor-shim.sh` and `export EDITOR=~/.claude/editor-shim.sh` |
-
-Check if these lines already exist before adding them. If `VISUAL`/`EDITOR` are already set to something else, replace them.
-
-### 5. Add the session hook
-
-Read `~/.claude/settings.json` (create it if missing). Merge a `SessionStart` hook into the `hooks` object — do not overwrite existing hooks or other settings:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "type": "command",
-        "command": "~/.claude-pager/shim/save-session-transcript.sh"
-      }
-    ]
-  }
-}
-```
-
-If a `SessionStart` array already exists, append to it. If the hook command is already present, skip.
-
-### 6. Done
-
-Tell the user to restart their shell (or `source` their config) and press **Ctrl-G** in Claude Code. The pager will render their conversation transcript while the editor is open.
+Tell the user to restart Claude Code and press **Ctrl-G**. The pager will render their conversation transcript while the editor is open.
 
 ### Agent notes
 
 - The binary auto-detects TurboDraft's Unix socket — no special config needed for TurboDraft users
-- If no `CLAUDE_PAGER_EDITOR` is set, the binary uses `VISUAL` → `EDITOR` → macOS `open -W -t`
+- Editor resolution: `CLAUDE_PAGER_EDITOR` → `VISUAL` → `EDITOR` → `open -W -t` (macOS default)
+- Claude Code exports `env` from settings.json as environment variables, so `CLAUDE_PAGER_EDITOR` just works via `getenv()`
 - The session hook enables multi-session support; without it the pager falls back to the most recent transcript in the project directory
-- `_CLAUDE_PAGER_ACTIVE` env var is set internally to prevent recursion when `VISUAL`/`EDITOR` points to the shim — agents do not need to set this
+- `_CLAUDE_PAGER_ACTIVE` env var is set internally to prevent recursion — agents do not need to set this
+- No shell config changes (VISUAL/EDITOR) are needed — settings.json is the canonical configuration path
 
 ## Development
 
@@ -224,7 +239,7 @@ make            # builds claude-pager-open
 make clean      # removes build artifacts
 ```
 
-The C source is in `bin/claude-pager-open.c` (editor detection + socket + fork logic) and `bin/pager.c` (pager rendering).
+The C source is in `bin/claude-pager-open.c` (editor resolution + socket + fork logic) and `bin/pager.c` (pager rendering).
 
 The Python pager (`src/claude_pager/`) and bash shim (`shim/claude-pager-shim.sh`) are legacy fallbacks — the C binary handles everything.
 

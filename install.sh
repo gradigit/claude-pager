@@ -6,7 +6,6 @@ set -euo pipefail
 REPO="https://github.com/gradigit/claude-pager.git"
 INSTALL_DIR="${HOME}/.claude-pager"
 BINARY="${INSTALL_DIR}/bin/claude-pager-open"
-SHIM="${HOME}/.claude/editor-shim.sh"
 SETTINGS="${HOME}/.claude/settings.json"
 HOOK="${INSTALL_DIR}/shim/save-session-transcript.sh"
 
@@ -31,70 +30,125 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 echo "Built: $BINARY"
 
-# ── Editor shim ──────────────────────────────────────────────────────────────
-mkdir -p "$(dirname "$SHIM")"
-cat > "$SHIM" <<EOF
-#!/usr/bin/env bash
-exec "$BINARY" "\$@"
-EOF
-chmod +x "$SHIM"
-echo "Editor shim: $SHIM"
-
-# ── Session hook ─────────────────────────────────────────────────────────────
-if [[ -f "$SETTINGS" ]]; then
-    # Check if hook already exists
-    if grep -q "save-session-transcript" "$SETTINGS" 2>/dev/null; then
-        echo "Session hook already configured in $SETTINGS"
+# ── Ensure jq is available ───────────────────────────────────────────────────
+if ! command -v jq &>/dev/null; then
+    echo "jq not found — installing via Homebrew..."
+    if command -v brew &>/dev/null; then
+        brew install jq
     else
-        echo ""
-        echo "Add this hook to $SETTINGS under \"hooks\":"
-        echo ""
-        echo '  "SessionStart": [{'
-        echo '    "type": "command",'
-        echo "    \"command\": \"$HOOK\""
-        echo '  }]'
-        echo ""
+        echo "ERROR: jq is required but not installed, and Homebrew is not available." >&2
+        echo "  Install jq manually: https://jqlang.github.io/jq/download/" >&2
+        exit 1
     fi
-else
-    mkdir -p "$(dirname "$SETTINGS")"
-    cat > "$SETTINGS" <<EOF
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "type": "command",
-        "command": "$HOOK"
-      }
-    ]
-  }
-}
-EOF
-    echo "Created $SETTINGS with session hook"
 fi
 
-# ── Shell config ─────────────────────────────────────────────────────────────
-echo ""
-echo "Done! Add to your shell config:"
-echo ""
+# ── Configure settings.json ─────────────────────────────────────────────────
+mkdir -p "$(dirname "$SETTINGS")"
 
-# Detect shell
-case "${SHELL:-}" in
-    */fish)
-        echo "  # fish — add to ~/.config/fish/config.fish"
-        echo "  set -gx VISUAL $SHIM"
-        echo "  set -gx EDITOR $SHIM"
-        ;;
-    */zsh)
-        echo "  # zsh — add to ~/.zshrc"
-        echo "  export VISUAL=\"$SHIM\""
-        echo "  export EDITOR=\"$SHIM\""
-        ;;
-    *)
-        echo "  # bash — add to ~/.bashrc"
-        echo "  export VISUAL=\"$SHIM\""
-        echo "  export EDITOR=\"$SHIM\""
-        ;;
-esac
+if [[ ! -f "$SETTINGS" ]]; then
+    echo "{}" > "$SETTINGS"
+fi
+
+# Read current editor value (if any)
+OLD_EDITOR=$(jq -r '.editor // empty' "$SETTINGS")
+
+# Save old editor as env.CLAUDE_PAGER_EDITOR (if it's not already our binary)
+if [[ -n "$OLD_EDITOR" && "$OLD_EDITOR" != "$BINARY" && "$OLD_EDITOR" != *"claude-pager"* ]]; then
+    echo "Preserving previous editor: $OLD_EDITOR"
+    SETTINGS_TMP=$(mktemp)
+    jq --arg ed "$OLD_EDITOR" '.env.CLAUDE_PAGER_EDITOR = $ed' "$SETTINGS" > "$SETTINGS_TMP"
+    mv "$SETTINGS_TMP" "$SETTINGS"
+else
+    # Check if CLAUDE_PAGER_EDITOR is already set
+    EXISTING_CPE=$(jq -r '.env.CLAUDE_PAGER_EDITOR // empty' "$SETTINGS")
+    if [[ -z "$EXISTING_CPE" ]]; then
+        # No old editor and no CLAUDE_PAGER_EDITOR — try to detect an IDE
+        DETECTED=""
+        for candidate in cursor code zed subl; do
+            if command -v "$candidate" &>/dev/null; then
+                case "$candidate" in
+                    cursor) DETECTED="cursor --wait" ;;
+                    code)   DETECTED="code --wait" ;;
+                    zed)    DETECTED="zed --wait" ;;
+                    subl)   DETECTED="subl --wait" ;;
+                esac
+                break
+            fi
+        done
+
+        if [[ -n "$DETECTED" ]]; then
+            echo "Detected editor: $DETECTED"
+            SETTINGS_TMP=$(mktemp)
+            jq --arg ed "$DETECTED" '.env.CLAUDE_PAGER_EDITOR = $ed' "$SETTINGS" > "$SETTINGS_TMP"
+            mv "$SETTINGS_TMP" "$SETTINGS"
+        else
+            # Nothing detected — prompt the user
+            echo ""
+            echo "No GUI editor detected. Which editor should claude-pager open files in?"
+            echo ""
+            echo "  1) code --wait      (VS Code)"
+            echo "  2) cursor --wait    (Cursor)"
+            echo "  3) zed --wait       (Zed)"
+            echo "  4) subl --wait      (Sublime Text)"
+            echo "  5) vim              (terminal)"
+            echo "  6) nvim             (terminal)"
+            echo "  7) other"
+            echo ""
+            read -rp "Choice [1-7]: " choice
+            case "$choice" in
+                1) DETECTED="code --wait" ;;
+                2) DETECTED="cursor --wait" ;;
+                3) DETECTED="zed --wait" ;;
+                4) DETECTED="subl --wait" ;;
+                5) DETECTED="vim" ;;
+                6) DETECTED="nvim" ;;
+                7)
+                    read -rp "Enter editor command: " DETECTED
+                    ;;
+                *)
+                    echo "No editor selected — you can set it later in ~/.claude/settings.json"
+                    DETECTED=""
+                    ;;
+            esac
+
+            if [[ -n "$DETECTED" ]]; then
+                SETTINGS_TMP=$(mktemp)
+                jq --arg ed "$DETECTED" '.env.CLAUDE_PAGER_EDITOR = $ed' "$SETTINGS" > "$SETTINGS_TMP"
+                mv "$SETTINGS_TMP" "$SETTINGS"
+                echo "Set editor: $DETECTED"
+            fi
+        fi
+    else
+        echo "Editor already configured: $EXISTING_CPE"
+    fi
+fi
+
+# Set editor to claude-pager-open binary
+SETTINGS_TMP=$(mktemp)
+jq --arg bin "$BINARY" '.editor = $bin' "$SETTINGS" > "$SETTINGS_TMP"
+mv "$SETTINGS_TMP" "$SETTINGS"
+echo "Set editor in settings.json: $BINARY"
+
+# ── Session hook ─────────────────────────────────────────────────────────────
+if jq -e '.hooks.SessionStart' "$SETTINGS" &>/dev/null; then
+    if jq -e '.hooks.SessionStart[] | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
+        echo "Session hook already configured"
+    else
+        SETTINGS_TMP=$(mktemp)
+        jq --arg cmd "$HOOK" '.hooks.SessionStart += [{"type": "command", "command": $cmd}]' "$SETTINGS" > "$SETTINGS_TMP"
+        mv "$SETTINGS_TMP" "$SETTINGS"
+        echo "Added session hook"
+    fi
+else
+    SETTINGS_TMP=$(mktemp)
+    jq --arg cmd "$HOOK" '.hooks.SessionStart = [{"type": "command", "command": $cmd}]' "$SETTINGS" > "$SETTINGS_TMP"
+    mv "$SETTINGS_TMP" "$SETTINGS"
+    echo "Added session hook"
+fi
 
 echo ""
-echo "Then restart your shell and press Ctrl-G in Claude Code."
+echo "Done! Restart Claude Code and press Ctrl-G to use the pager."
+echo ""
+echo "Your editor is configured in ~/.claude/settings.json:"
+echo "  editor: $BINARY"
+echo "  env.CLAUDE_PAGER_EDITOR: $(jq -r '.env.CLAUDE_PAGER_EDITOR // "not set"' "$SETTINGS")"

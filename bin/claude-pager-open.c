@@ -120,6 +120,53 @@ static void json_escape_path(const char *src, char *dst, size_t dstlen) {
     dst[i] = '\0';
 }
 
+/* ── Read editor from settings.json ────────────────────────────────────────── */
+
+static int read_settings_editor(const char *home, char *out, size_t outlen) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/.claude/settings.json", home);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char buf[8192];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return -1;
+    buf[n] = '\0';
+
+    /* Find "env" object, then "CLAUDE_PAGER_EDITOR" within it */
+    const char *env = strstr(buf, "\"env\"");
+    if (!env) return -1;
+    const char *brace = strchr(env + 4, '{');
+    if (!brace) return -1;
+
+    const char *needle = "\"CLAUDE_PAGER_EDITOR\"";
+    const char *key = strstr(brace, needle);
+    if (!key) return -1;
+
+    /* Find the closing brace of env to make sure key is inside it */
+    int depth = 1;
+    const char *p = brace + 1;
+    while (*p && depth > 0) {
+        if (p == key) break;  /* found key before env closes — good */
+        if (*p == '{') depth++;
+        else if (*p == '}') depth--;
+        p++;
+    }
+    if (depth == 0) return -1;  /* key was outside env object */
+
+    /* Extract value */
+    const char *colon = strchr(key + strlen(needle), ':');
+    if (!colon) return -1;
+    const char *quote1 = strchr(colon, '"');
+    if (!quote1) return -1;
+    quote1++;
+    const char *quote2 = strchr(quote1, '"');
+    if (!quote2 || (size_t)(quote2 - quote1) >= outlen) return -1;
+    memcpy(out, quote1, (size_t)(quote2 - quote1));
+    out[quote2 - quote1] = '\0';
+    return 0;
+}
+
 /* ── Transcript finding (pure C, no process spawns) ────────────────────────── */
 
 static int newest_jsonl(const char *dir, char *out, size_t outlen) {
@@ -232,12 +279,17 @@ static void pre_render(int tty_fd) {
 
 /* ── Fork pager child ──────────────────────────────────────────────────────── */
 
-static pid_t fork_pager(const char *transcript, int watch_pid) {
+static pid_t fork_pager(int watch_pid) {
     pid_t pid = fork();
     if (pid == 0) {
         int tty_fd = open("/dev/tty", O_RDWR);
         if (tty_fd >= 0) {
             pre_render(tty_fd);
+            /* Transcript lookup happens here in the child, overlapping
+             * with TurboDraft's window creation in the parent. */
+            char transcript[2048] = "";
+            const char *home = getenv("HOME");
+            if (home) find_transcript(home, transcript, sizeof(transcript));
             run_pager(tty_fd, transcript, watch_pid, 200000);
             close(tty_fd);
         }
@@ -248,11 +300,16 @@ static pid_t fork_pager(const char *transcript, int watch_pid) {
 
 /* ── TurboDraft fast path ──────────────────────────────────────────────────── */
 
-static int turbodraft_path(const char *home, const char *file,
-                           const char *transcript) {
+static int turbodraft_path(const char *home, const char *file) {
     char sock_path[512];
     snprintf(sock_path, sizeof(sock_path),
              "%s/Library/Application Support/TurboDraft/turbodraft.sock", home);
+
+    /* Fast bail: if the socket file doesn't exist, TurboDraft isn't installed */
+    if (access(sock_path, F_OK) != 0) {
+        DBG("turbodraft socket not found: %s\n", sock_path);
+        return -1;
+    }
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -262,8 +319,38 @@ static int turbodraft_path(const char *home, const char *file,
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        DBG("turbodraft socket connect failed: %s\n", strerror(errno));
+    /* Retry connection — TurboDraft may be restarting after Cmd-Q.
+     * LaunchAgent restart can take 3-4 seconds in practice.
+     * Only retry on transient errors (ECONNREFUSED); bail immediately
+     * on permanent errors (ENOENT = socket disappeared). */
+    int connected = 0;
+    for (int attempt = 0; attempt < 100; attempt++) {
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            connected = 1;
+            break;
+        }
+        if (errno == ENOENT) {
+            DBG("turbodraft socket disappeared\n");
+            close(fd);
+            return -1;
+        }
+        if (attempt == 0) {
+            DBG("turbodraft socket connect failed: %s (retrying)\n", strerror(errno));
+            /* Show pager frame immediately so user sees something
+             * while waiting for TurboDraft to restart. */
+            int tty = open("/dev/tty", O_RDWR);
+            if (tty >= 0) { pre_render(tty); close(tty); }
+        }
+        usleep(50000); /* 50ms */
+        close(fd);
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+    }
+    if (!connected) {
+        DBG("turbodraft socket connect failed after retries\n");
         close(fd);
         return -1;
     }
@@ -282,20 +369,19 @@ static int turbodraft_path(const char *home, const char *file,
     DBG("session.open sent\n");
 
     /* Fork pager (runs in parallel with TurboDraft's ~120ms open) */
-    signal(SIGCHLD, SIG_IGN);
-    pid_t pager_pid = fork_pager(transcript, (int)getpid());
+    pid_t pager_pid = fork_pager((int)getpid());
     DBG("pager forked pid=%d\n", (int)pager_pid);
 
     /* Read session.open response */
     char *resp = recv_msg(fd);
-    if (!resp) { kill(pager_pid, SIGTERM); close(fd); return 1; }
+    if (!resp) { kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(fd); return 1; }
 
     char session_id[256] = "";
     extract_str(resp, "sessionId", session_id, sizeof(session_id));
     DBG("sessionId=%s\n", session_id[0] ? session_id : "(missing)");
     free(resp);
 
-    if (!session_id[0]) { kill(pager_pid, SIGTERM); close(fd); return 1; }
+    if (!session_id[0]) { kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(fd); return 1; }
 
     /* Send session.wait — blocks until TurboDraft session ends */
     char wait_msg[512];
@@ -306,42 +392,107 @@ static int turbodraft_path(const char *home, const char *file,
              session_id);
 
     if (send_msg(fd, wait_msg) < 0) {
-        kill(pager_pid, SIGTERM); close(fd); return 0;
+        kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(fd); return 0;
     }
 
+    /* --- Close path timing (reset clock to measure from editor close) --- */
     char *resp3 = recv_msg(fd);
+    gettimeofday(&t0, NULL);  /* Reset clock: t=0 is now "editor closed" */
+    DBG("--- close path start (session.wait returned)\n");
     if (resp3) free(resp3);
     close(fd);
 
     kill(pager_pid, SIGTERM);
+    DBG("pager SIGTERM sent\n");
+    waitpid(pager_pid, NULL, 0);
+    DBG("pager exited, returning to Claude Code\n");
     return 0;
 }
 
-/* ── Generic editor path ───────────────────────────────────────────────────── */
+/* ── Self-reference detection ──────────────────────────────────────────────── */
 
-static int generic_editor_path(const char *file, const char *transcript) {
-    /* Resolve editor command */
-    const char *editor = getenv("CLAUDE_PAGER_EDITOR");
-    if (!editor || !editor[0]) editor = getenv("VISUAL");
-    if (!editor || !editor[0]) editor = getenv("EDITOR");
+static int is_self(const char *cmd) {
+    char tok[256];
+    if (sscanf(cmd, "%255s", tok) != 1) return 0;
+    const char *base = strrchr(tok, '/');
+    base = base ? base + 1 : tok;
+    return strstr(base, "claude-pager") != NULL;
+}
 
-    if (!editor || !editor[0]) {
-        DBG("no editor found, using system default\n");
-#ifdef __APPLE__
-        execlp("open", "open", "-W", "-t", file, (char *)NULL);
-#else
-        execlp("xdg-open", "xdg-open", file, (char *)NULL);
-#endif
-        _exit(1);
+/* ── Editor command validation ─────────────────────────────────────────────── */
+
+static int editor_exists(const char *cmd) {
+    char tok[256];
+    if (sscanf(cmd, "%255s", tok) != 1) return 0;
+
+    /* Absolute path — check directly */
+    if (tok[0] == '/') return access(tok, X_OK) == 0;
+
+    /* Bare name — search PATH */
+    const char *path = getenv("PATH");
+    if (!path) return 0;
+    char pathbuf[8192];
+    strncpy(pathbuf, path, sizeof(pathbuf) - 1);
+    pathbuf[sizeof(pathbuf) - 1] = '\0';
+    char *saveptr = NULL;
+    for (char *dir = strtok_r(pathbuf, ":", &saveptr); dir;
+         dir = strtok_r(NULL, ":", &saveptr)) {
+        char full[2048];
+        snprintf(full, sizeof(full), "%s/%s", dir, tok);
+        if (access(full, X_OK) == 0) return 1;
+    }
+    return 0;
+}
+
+/* ── Terminal editor detection ─────────────────────────────────────────────── */
+
+static const char *tui_editors[] = {
+    "vi", "vim", "nvim", "lvim", "nvi",
+    "vim.basic", "vim.tiny", "vim.nox", "vim.gtk", "vim.gtk3",
+    "emacs", "nano", "micro",
+    "helix", "hx", "kakoune", "kak", "joe", "ed", "ne",
+    "mg", "jed", "tilde", "dte", "mcedit", "amp", NULL
+};
+
+static int is_terminal_editor(const char *editor) {
+    /* Env override: CLAUDE_PAGER_EDITOR_TYPE=tui|gui */
+    const char *override = getenv("CLAUDE_PAGER_EDITOR_TYPE");
+    if (override) {
+        if (strcmp(override, "tui") == 0) return 1;
+        if (strcmp(override, "gui") == 0) return 0;
     }
 
-    DBG("editor=%s\n", editor);
+    /* Extract basename of first token */
+    char tok[256];
+    if (sscanf(editor, "%255s", tok) != 1) return 0;
+    const char *base = strrchr(tok, '/');
+    base = base ? base + 1 : tok;
 
+    for (int i = 0; tui_editors[i]; i++) {
+        if (strcmp(base, tui_editors[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+/* ── Terminal editor path (exec directly, no pager) ────────────────────────── */
+
+static int terminal_editor_path(const char *editor, const char *file) {
+    DBG("terminal editor, exec without pager\n");
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "exec %s \"$1\"", editor);
+    execl("/bin/sh", "sh", "-c", cmd, "sh", file, (char *)NULL);
+    _exit(127);
+}
+
+/* ── Generic editor path (GUI editor + pager) ──────────────────────────────── */
+
+static int generic_editor_path(const char *editor, const char *file) {
     /* Fork editor as child */
     pid_t ed_pid = fork();
     if (ed_pid == 0) {
-        /* Clear recursion guard so the editor doesn't hit it */
-        unsetenv("_CLAUDE_PAGER_ACTIVE");
+        /* Keep _CLAUDE_PAGER_ACTIVE set so that if the resolved editor
+         * is claude-pager-open itself, it hits the recursion guard
+         * instead of fork-bombing. */
         char cmd[4096];
         snprintf(cmd, sizeof(cmd), "exec %s \"$1\"", editor);
         execl("/bin/sh", "sh", "-c", cmd, "sh", file, (char *)NULL);
@@ -350,7 +501,7 @@ static int generic_editor_path(const char *file, const char *transcript) {
     DBG("editor forked pid=%d\n", (int)ed_pid);
 
     /* Fork pager — watches editor PID */
-    pid_t pager_pid = fork_pager(transcript, (int)ed_pid);
+    pid_t pager_pid = fork_pager((int)ed_pid);
     DBG("pager forked pid=%d\n", (int)pager_pid);
 
     /* Wait for editor to close */
@@ -358,8 +509,11 @@ static int generic_editor_path(const char *file, const char *transcript) {
     waitpid(ed_pid, &status, 0);
     DBG("editor exited status=%d\n", status);
 
-    /* Kill pager */
-    if (pager_pid > 0) kill(pager_pid, SIGTERM);
+    /* Kill pager and wait for terminal restore */
+    if (pager_pid > 0) {
+        kill(pager_pid, SIGTERM);
+        waitpid(pager_pid, NULL, 0);
+    }
     return 0;
 }
 
@@ -374,6 +528,17 @@ int main(int argc, char *argv[]) {
     const char *file = argv[1];
     const char *home = getenv("HOME");
     DBG("--- claude-pager-open pid=%d file=%s\n", (int)getpid(), file);
+
+    /* Measure Claude Code's overhead: gap between temp file creation and us */
+    if (dbg) {
+        struct stat file_st;
+        if (stat(file, &file_st) == 0) {
+            double file_us = file_st.st_mtimespec.tv_sec * 1e6
+                           + file_st.st_mtimespec.tv_nsec / 1e3;
+            double start_us = t0.tv_sec * 1e6 + t0.tv_usec;
+            DBG("claude-code exec overhead: %.2fms\n", (start_us - file_us) / 1e3);
+        }
+    }
 
     if (!home) {
 #ifdef __APPLE__
@@ -395,16 +560,65 @@ int main(int argc, char *argv[]) {
     }
     setenv("_CLAUDE_PAGER_ACTIVE", "1", 1);
 
-    /* Pre-compute transcript path */
-    char transcript[2048] = "";
-    find_transcript(home, transcript, sizeof(transcript));
-    DBG("transcript=%s\n", transcript[0] ? transcript : "(none)");
+    /* Resolve editor: CLAUDE_PAGER_EDITOR (env or settings.json) → VISUAL → EDITOR */
+    const char *editor = getenv("CLAUDE_PAGER_EDITOR");
+    const char *source = "CLAUDE_PAGER_EDITOR";
+    static char settings_editor[512];
+    if (!editor || !editor[0]) {
+        /* Claude Code doesn't export env section to editor process,
+         * so read it directly from settings.json */
+        if (read_settings_editor(home, settings_editor, sizeof(settings_editor)) == 0) {
+            editor = settings_editor;
+            source = "settings.json env.CLAUDE_PAGER_EDITOR";
+        }
+    }
+    DBG("env CLAUDE_PAGER_EDITOR=%s\n", editor ? editor : "(null)");
+    DBG("env VISUAL=%s\n", getenv("VISUAL") ? getenv("VISUAL") : "(null)");
+    DBG("env EDITOR=%s\n", getenv("EDITOR") ? getenv("EDITOR") : "(null)");
+    if (editor && (!editor[0] || is_self(editor))) {
+        DBG("skipped CLAUDE_PAGER_EDITOR=%s\n", editor);
+        editor = NULL;
+    }
+    if (!editor) {
+        editor = getenv("VISUAL");
+        source = "VISUAL";
+        if (editor && (!editor[0] || is_self(editor))) {
+            DBG("skipped VISUAL=%s\n", editor);
+            editor = NULL;
+        }
+    }
+    if (!editor) {
+        editor = getenv("EDITOR");
+        source = "EDITOR";
+        if (editor && (!editor[0] || is_self(editor))) {
+            DBG("skipped EDITOR=%s\n", editor);
+            editor = NULL;
+        }
+    }
 
-    /* Try TurboDraft fast path first */
-    int rc = turbodraft_path(home, file, transcript);
-    if (rc >= 0) return rc;
+    /* Validate the resolved editor actually exists */
+    if (editor && !editor_exists(editor)) {
+        fprintf(stderr, "claude-pager: editor not found: %s (from %s)\n", editor, source);
+        fprintf(stderr, "  Check the command exists and is in your PATH\n");
+        fprintf(stderr, "  Fix CLAUDE_PAGER_EDITOR in ~/.claude/settings.json env section\n");
+        DBG("editor not found: %s (from %s)\n", editor, source);
+        editor = NULL;
+    }
 
-    /* TurboDraft unavailable — use generic editor path */
-    DBG("turbodraft unavailable, using generic editor\n");
-    return generic_editor_path(file, transcript);
+    /* If no editor configured/valid, try TurboDraft before falling back to system default */
+    if (!editor) {
+        int rc = turbodraft_path(home, file);
+        if (rc >= 0) return rc;
+        DBG("turbodraft unavailable, using system default\n");
+        fprintf(stderr, "claude-pager: no editor configured — using system default\n");
+        fprintf(stderr, "  Set CLAUDE_PAGER_EDITOR in ~/.claude/settings.json env section\n");
+        editor = "open -W -t";
+        source = "system default";
+    }
+    DBG("resolved editor=%s (from %s)\n", editor, source);
+
+    if (is_terminal_editor(editor))
+        return terminal_editor_path(editor, file);
+    else
+        return generic_editor_path(editor, file);
 }

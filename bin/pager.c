@@ -398,14 +398,18 @@ static void linkify(char *dst, int dstmax, const char *src) {
             }
             continue;
         }
-        /* Detect file path: /segment/segment... */
-        if (p[0]=='/' && is_pathch(p[1])) {
+        /* Detect file path: /segment/segment... or ~/segment... */
+        if ((p[0]=='/' && is_pathch(p[1])) ||
+            (p[0]=='~' && p[1]=='/' && is_pathch(p[2]))) {
+            int tilde = (p[0] == '~');
             const char *start = p;
-            const char *sp = p + 1;
+            const char *sp = tilde ? p + 2 : p + 1;
             while (*sp && is_pathch(*sp)) sp++;
             int has_slash = 0;
-            for (const char *c=start+1; c<sp; c++) { if (*c=='/') { has_slash=1; break; } }
-            if (has_slash && (sp-start) >= 3) {
+            const char *check_from = tilde ? start + 2 : start + 1;
+            for (const char *c=check_from; c<sp; c++) { if (*c=='/') { has_slash=1; break; } }
+            /* ~/foo is a valid path even without a second slash */
+            if ((tilde && (sp-start) >= 3) || (has_slash && (sp-start) >= 3)) {
                 p = sp;
                 while (p>start+1 && (p[-1]=='.'||p[-1]==',')) p--;
                 int fplen = (int)(p - start);
@@ -413,7 +417,15 @@ static void linkify(char *dst, int dstmax, const char *src) {
                     char label[256];
                     shorten_path(label, sizeof(label), start, fplen);
                     LF_S("\033]8;;file://");
-                    for (int i=0; i<fplen; i++) LF_CH(start[i]);
+                    if (tilde) {
+                        /* Expand ~ to $HOME in the URI */
+                        const char *hm = getenv("HOME");
+                        if (hm) { LF_S(hm); }
+                        /* skip the ~ , emit /rest/of/path */
+                        for (int i=1; i<fplen; i++) LF_CH(start[i]);
+                    } else {
+                        for (int i=0; i<fplen; i++) LF_CH(start[i]);
+                    }
                     LF_CH('\a');
                     LF_S(UL_ON);
                     LF_S(label);
