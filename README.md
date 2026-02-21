@@ -29,7 +29,7 @@ The pager is a single compiled C binary — no Python, no Node, no runtime depen
 curl -sSL https://raw.githubusercontent.com/gradigit/claude-pager/main/install.sh | bash
 ```
 
-This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` in `~/.claude/settings.json`, and preserves your original editor as `env.CLAUDE_PAGER_EDITOR`. No shell config changes needed.
+This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` in `~/.claude/settings.json`, preserves your original editor as `env.CLAUDE_PAGER_EDITOR`, and writes `env.CLAUDE_PAGER_EDITOR_TYPE` (`tui`/`gui`). No shell config changes needed.
 
 ### AI agent install
 
@@ -57,12 +57,13 @@ Add to `~/.claude/settings.json`:
 {
   "editor": "/path/to/claude-pager-open",
   "env": {
-    "CLAUDE_PAGER_EDITOR": "code --wait"
+    "CLAUDE_PAGER_EDITOR": "code --wait",
+    "CLAUDE_PAGER_EDITOR_TYPE": "gui"
   }
 }
 ```
 
-Claude Code sets `editor` as the binary it spawns on Ctrl-G, and exports `env` values as environment variables — so `CLAUDE_PAGER_EDITOR` is available to the binary via `getenv()`.
+Claude Code sets `editor` as the binary it spawns on Ctrl-G. Since `env` values may not be exported to the editor process, claude-pager reads `~/.claude/settings.json` directly for `env.CLAUDE_PAGER_EDITOR` and `env.CLAUDE_PAGER_EDITOR_TYPE`.
 
 ### 2. Install the session hook
 
@@ -92,7 +93,8 @@ Your editor is stored in `env.CLAUDE_PAGER_EDITOR` in `~/.claude/settings.json`.
 ```json
 {
   "env": {
-    "CLAUDE_PAGER_EDITOR": "cursor --wait"
+    "CLAUDE_PAGER_EDITOR": "cursor --wait",
+    "CLAUDE_PAGER_EDITOR_TYPE": "gui"
   }
 }
 ```
@@ -108,11 +110,11 @@ Common values:
 | Vim | `vim` |
 | Neovim | `nvim` |
 
-The resolution order is: `CLAUDE_PAGER_EDITOR` → `VISUAL` → `EDITOR` → system default (`open -W -t`).
+The resolution order is: `CLAUDE_PAGER_EDITOR` (env or settings.json) → `VISUAL` → `EDITOR` → system default (`open -W -t`).
 
 TUI editors (vim, nvim, emacs, nano, etc.) are exec'd directly without the pager. GUI editors are forked with the pager running alongside.
 
-You can force the path with `CLAUDE_PAGER_EDITOR_TYPE=tui` or `CLAUDE_PAGER_EDITOR_TYPE=gui` in the `env` section.
+You can force the path with `CLAUDE_PAGER_EDITOR_TYPE=tui` or `CLAUDE_PAGER_EDITOR_TYPE=gui` in the `env` section (read from env or settings.json).
 
 ## Key Bindings
 
@@ -142,8 +144,8 @@ The pager uses alternate scroll mode (`\033[?1007h`) instead of mouse tracking, 
 
 ```
 claude-pager-open (C binary, ~70KB)
-├── Editor resolution (CLAUDE_PAGER_EDITOR → VISUAL → EDITOR → system default)
-├── TUI detection (exec directly for terminal editors, fork+pager for GUI)
+├── Editor resolution (CLAUDE_PAGER_EDITOR from env/settings.json → VISUAL → EDITOR → system default)
+├── TUI detection (known TUI list + optional CLAUDE_PAGER_EDITOR_TYPE override + optimistic unknown-editor probe)
 ├── TurboDraft socket client (JSON-RPC 2.0 over Unix domain socket)
 ├── Generic editor path (fork editor + fork pager + waitpid)
 ├── Transcript parser (minimal JSON scanner, single-pass JSONL)
@@ -180,7 +182,8 @@ Read `~/.claude/settings.json` (create with `{}` if missing). Use `jq` to:
 
 1. Save the current `editor` value as `env.CLAUDE_PAGER_EDITOR` (if it exists and isn't already claude-pager)
 2. Set `editor` to the binary path
-3. Add the session hook
+3. Infer `env.CLAUDE_PAGER_EDITOR_TYPE` (`tui` or `gui`)
+4. Add the session hook
 
 ```sh
 BINARY="$HOME/.claude-pager/bin/claude-pager-open"
@@ -209,6 +212,16 @@ fi
 # Set editor to claude-pager-open
 jq --arg bin "$BINARY" '.editor = $bin' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 
+# Infer editor type
+tok="$(jq -r '.env.CLAUDE_PAGER_EDITOR // empty' "$SETTINGS" | awk '{print $1}' | xargs basename 2>/dev/null || true)"
+case "$tok" in
+  vi|vim|nvim|lvim|nvi|vim.basic|vim.tiny|vim.nox|vim.gtk|vim.gtk3|emacs|nano|micro|helix|hx|kakoune|kak|joe|ed|ne|mg|jed|tilde|dte|mcedit|amp) ty="tui" ;;
+  *) ty="gui" ;;
+esac
+if [[ -n "$tok" ]]; then
+  jq --arg ty "$ty" '.env.CLAUDE_PAGER_EDITOR_TYPE = $ty' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+fi
+
 # Add session hook (if not already present)
 if ! jq -e '.hooks.SessionStart[]? | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
     jq --arg cmd "$HOOK" '
@@ -224,8 +237,8 @@ Tell the user to restart Claude Code and press **Ctrl-G**. The pager will render
 ### Agent notes
 
 - The binary auto-detects TurboDraft's Unix socket — no special config needed for TurboDraft users
-- Editor resolution: `CLAUDE_PAGER_EDITOR` → `VISUAL` → `EDITOR` → `open -W -t` (macOS default)
-- Claude Code exports `env` from settings.json as environment variables, so `CLAUDE_PAGER_EDITOR` just works via `getenv()`
+- Editor resolution: `CLAUDE_PAGER_EDITOR` (env or settings.json) → `VISUAL` → `EDITOR` → `open -W -t` (macOS default)
+- `CLAUDE_PAGER_EDITOR_TYPE` is also read from env or settings.json (`tui`/`gui` override)
 - The session hook enables multi-session support; without it the pager falls back to the most recent transcript in the project directory
 - `_CLAUDE_PAGER_ACTIVE` env var is set internally to prevent recursion — agents do not need to set this
 - No shell config changes (VISUAL/EDITOR) are needed — settings.json is the canonical configuration path
@@ -241,7 +254,7 @@ make clean      # removes build artifacts
 
 The C source is in `bin/claude-pager-open.c` (editor resolution + socket + fork logic) and `bin/pager.c` (pager rendering).
 
-The Python pager (`src/claude_pager/`) and bash shim (`shim/claude-pager-shim.sh`) are legacy fallbacks — the C binary handles everything.
+The runtime is fully C-based: `bin/claude-pager-open.c` handles editor/session orchestration and `bin/pager.c` handles rendering.
 
 ## License
 

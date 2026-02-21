@@ -7,3 +7,9 @@ dist/
 # C build artifacts
 *.o
 bin/claude-pager-open
+bin/claude-pager-c
+bin/test_linkify
+
+# Handoff artifacts
+HANDOFF.md
+.handoff-fresh/

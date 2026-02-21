@@ -9,6 +9,21 @@ BINARY="${INSTALL_DIR}/bin/claude-pager-open"
 SETTINGS="${HOME}/.claude/settings.json"
 HOOK="${INSTALL_DIR}/shim/save-session-transcript.sh"
 
+infer_editor_type() {
+    local cmd="$1"
+    local tok="${cmd%% *}"
+    tok="${tok##*/}"
+    case "$tok" in
+        vi|vim|nvim|lvim|nvi|vim.basic|vim.tiny|vim.nox|vim.gtk|vim.gtk3|\
+        emacs|nano|micro|helix|hx|kakoune|kak|joe|ed|ne|mg|jed|tilde|dte|mcedit|amp)
+            echo "tui"
+            ;;
+        *)
+            echo "gui"
+            ;;
+    esac
+}
+
 echo "Installing claude-pager..."
 
 # ── Clone or update ──────────────────────────────────────────────────────────
@@ -129,6 +144,16 @@ jq --arg bin "$BINARY" '.editor = $bin' "$SETTINGS" > "$SETTINGS_TMP"
 mv "$SETTINGS_TMP" "$SETTINGS"
 echo "Set editor in settings.json: $BINARY"
 
+# Infer editor type from configured CLAUDE_PAGER_EDITOR and persist it
+FINAL_EDITOR=$(jq -r '.env.CLAUDE_PAGER_EDITOR // empty' "$SETTINGS")
+if [[ -n "$FINAL_EDITOR" ]]; then
+    FINAL_EDITOR_TYPE=$(infer_editor_type "$FINAL_EDITOR")
+    SETTINGS_TMP=$(mktemp)
+    jq --arg ty "$FINAL_EDITOR_TYPE" '.env.CLAUDE_PAGER_EDITOR_TYPE = $ty' "$SETTINGS" > "$SETTINGS_TMP"
+    mv "$SETTINGS_TMP" "$SETTINGS"
+    echo "Set editor type: $FINAL_EDITOR_TYPE"
+fi
+
 # ── Session hook ─────────────────────────────────────────────────────────────
 if jq -e '.hooks.SessionStart' "$SETTINGS" &>/dev/null; then
     if jq -e '.hooks.SessionStart[] | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
@@ -152,3 +177,4 @@ echo ""
 echo "Your editor is configured in ~/.claude/settings.json:"
 echo "  editor: $BINARY"
 echo "  env.CLAUDE_PAGER_EDITOR: $(jq -r '.env.CLAUDE_PAGER_EDITOR // "not set"' "$SETTINGS")"
+echo "  env.CLAUDE_PAGER_EDITOR_TYPE: $(jq -r '.env.CLAUDE_PAGER_EDITOR_TYPE // "not set"' "$SETTINGS")"

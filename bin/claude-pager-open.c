@@ -120,51 +120,93 @@ static void json_escape_path(const char *src, char *dst, size_t dstlen) {
     dst[i] = '\0';
 }
 
-/* ── Read editor from settings.json ────────────────────────────────────────── */
+/* ── Read env values from settings.json ───────────────────────────────────── */
 
-static int read_settings_editor(const char *home, char *out, size_t outlen) {
+static const char *skip_json_str(const char *p) {
+    if (!p || *p != '"') return p;
+    p++;
+    while (*p) {
+        if (*p == '\\') {
+            if (p[1]) p += 2;
+            else { p++; break; }
+            continue;
+        }
+        if (*p == '"') return p + 1;
+        p++;
+    }
+    return p;
+}
+
+static const char *find_matching_brace(const char *open_brace) {
+    if (!open_brace || *open_brace != '{') return NULL;
+    int depth = 1;
+    const char *p = open_brace + 1;
+    while (*p) {
+        if (*p == '"') { p = skip_json_str(p); continue; }
+        if (*p == '{') depth++;
+        else if (*p == '}') {
+            depth--;
+            if (depth == 0) return p;
+        }
+        p++;
+    }
+    return NULL;
+}
+
+static int read_settings_env_value(const char *home, const char *key,
+                                   char *out, size_t outlen) {
     char path[512];
     snprintf(path, sizeof(path), "%s/.claude/settings.json", home);
     FILE *f = fopen(path, "r");
     if (!f) return -1;
-    char buf[8192];
+
+    char buf[65536];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     if (n == 0) return -1;
     buf[n] = '\0';
 
-    /* Find "env" object, then "CLAUDE_PAGER_EDITOR" within it */
+    /* Find "env" object and bounds */
     const char *env = strstr(buf, "\"env\"");
     if (!env) return -1;
     const char *brace = strchr(env + 4, '{');
     if (!brace) return -1;
+    const char *env_end = find_matching_brace(brace);
+    if (!env_end) return -1;
 
-    const char *needle = "\"CLAUDE_PAGER_EDITOR\"";
-    const char *key = strstr(brace, needle);
-    if (!key) return -1;
-
-    /* Find the closing brace of env to make sure key is inside it */
-    int depth = 1;
-    const char *p = brace + 1;
-    while (*p && depth > 0) {
-        if (p == key) break;  /* found key before env closes — good */
-        if (*p == '{') depth++;
-        else if (*p == '}') depth--;
-        p++;
+    char needle[256];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    size_t needle_len = strlen(needle);
+    const char *k = brace;
+    while ((k = strstr(k, needle)) != NULL) {
+        if (k + (int)needle_len <= env_end) break;
+        k += needle_len;
     }
-    if (depth == 0) return -1;  /* key was outside env object */
+    if (!k || k >= env_end) return -1;
 
     /* Extract value */
-    const char *colon = strchr(key + strlen(needle), ':');
-    if (!colon) return -1;
+    const char *colon = strchr(k + needle_len, ':');
+    if (!colon || colon >= env_end) return -1;
     const char *quote1 = strchr(colon, '"');
-    if (!quote1) return -1;
+    if (!quote1 || quote1 >= env_end) return -1;
     quote1++;
-    const char *quote2 = strchr(quote1, '"');
-    if (!quote2 || (size_t)(quote2 - quote1) >= outlen) return -1;
+    const char *quote2 = quote1;
+    while (quote2 < env_end) {
+        if (*quote2 == '"' && (quote2 == quote1 || quote2[-1] != '\\')) break;
+        quote2++;
+    }
+    if (quote2 >= env_end || (size_t)(quote2 - quote1) >= outlen) return -1;
     memcpy(out, quote1, (size_t)(quote2 - quote1));
     out[quote2 - quote1] = '\0';
     return 0;
+}
+
+static int read_settings_editor(const char *home, char *out, size_t outlen) {
+    return read_settings_env_value(home, "CLAUDE_PAGER_EDITOR", out, outlen);
+}
+
+static int read_settings_editor_type(const char *home, char *out, size_t outlen) {
+    return read_settings_env_value(home, "CLAUDE_PAGER_EDITOR_TYPE", out, outlen);
 }
 
 /* ── Transcript finding (pure C, no process spawns) ────────────────────────── */
@@ -454,6 +496,28 @@ static const char *tui_editors[] = {
     "mg", "jed", "tilde", "dte", "mcedit", "amp", NULL
 };
 
+static const char *gui_editors[] = {
+    "open", "code", "cursor", "zed", "subl", "bbedit", "mate",
+    "idea", "webstorm", "pycharm", "goland", "clion", "rider",
+    "fleet", NULL
+};
+
+static const char *editor_basename(const char *editor, char *tok) {
+    if (!editor || sscanf(editor, "%255s", tok) != 1) return NULL;
+    const char *base = strrchr(tok, '/');
+    return base ? base + 1 : tok;
+}
+
+static int is_known_gui_editor(const char *editor) {
+    char tok[256];
+    const char *base = editor_basename(editor, tok);
+    if (!base) return 0;
+    for (int i = 0; gui_editors[i]; i++) {
+        if (strcmp(base, gui_editors[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 static int is_terminal_editor(const char *editor) {
     /* Env override: CLAUDE_PAGER_EDITOR_TYPE=tui|gui */
     const char *override = getenv("CLAUDE_PAGER_EDITOR_TYPE");
@@ -464,9 +528,8 @@ static int is_terminal_editor(const char *editor) {
 
     /* Extract basename of first token */
     char tok[256];
-    if (sscanf(editor, "%255s", tok) != 1) return 0;
-    const char *base = strrchr(tok, '/');
-    base = base ? base + 1 : tok;
+    const char *base = editor_basename(editor, tok);
+    if (!base) return 0;
 
     for (int i = 0; tui_editors[i]; i++) {
         if (strcmp(base, tui_editors[i]) == 0) return 1;
@@ -486,46 +549,78 @@ static int terminal_editor_path(const char *editor, const char *file) {
 
 /* ── Generic editor path (GUI editor + pager, with TUI auto-detection) ───── */
 
-static int generic_editor_path(const char *editor, const char *file) {
-    /* Fork editor with stdin detached. TUI editors die immediately
-     * without a terminal; GUI editors don't read stdin and keep running.
-     * This auto-detects unknown TUI editors not in our list. */
+static pid_t spawn_editor(const char *editor, const char *file, int detach_stdin) {
     pid_t ed_pid = fork();
     if (ed_pid == 0) {
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
+        if (detach_stdin) {
+            int devnull = open("/dev/null", O_RDONLY);
+            if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
+        }
         char cmd[4096];
         snprintf(cmd, sizeof(cmd), "exec %s \"$1\"", editor);
         execl("/bin/sh", "sh", "-c", cmd, "sh", file, (char *)NULL);
         _exit(127);
     }
-    DBG("probe: editor forked pid=%d (stdin detached)\n", (int)ed_pid);
+    return ed_pid;
+}
 
-    /* Grace period: TUI editors without a tty exit within ~30ms.
-     * GUI editors stay alive. Check every 10ms for 150ms. */
-    int probe_status;
-    int is_tui = 0;
+static int generic_editor_path(const char *editor, const char *file) {
+    /* Fast GUI path:
+     * 1) explicit CLAUDE_PAGER_EDITOR_TYPE=gui
+     * 2) known GUI editor basename (code/cursor/zed/...) */
+    const char *type = getenv("CLAUDE_PAGER_EDITOR_TYPE");
+    int forced_gui = type && strcmp(type, "gui") == 0;
+    int known_gui = is_known_gui_editor(editor);
+
+    if (forced_gui || known_gui) {
+        pid_t ed_pid = spawn_editor(editor, file, 0);
+        if (ed_pid < 0) return 1;
+        DBG("fast GUI path: editor forked pid=%d%s%s\n",
+            (int)ed_pid,
+            forced_gui ? " (forced gui)" : "",
+            known_gui ? " (known gui)" : "");
+
+        pid_t pager_pid = fork_pager((int)ed_pid);
+        DBG("pager forked pid=%d\n", (int)pager_pid);
+
+        int status;
+        waitpid(ed_pid, &status, 0);
+        DBG("editor exited status=%d\n", status);
+
+        if (pager_pid > 0) {
+            kill(pager_pid, SIGTERM);
+            waitpid(pager_pid, NULL, 0);
+        }
+        return 0;
+    }
+
+    /* Unknown editor path (optimistic):
+     * launch editor + pager immediately (zero GUI latency), then watch
+     * for 150ms. If editor exits quickly, classify as TUI and re-launch
+     * with a real terminal. */
+    pid_t ed_pid = spawn_editor(editor, file, 1);
+    if (ed_pid < 0) return 1;
+    DBG("optimistic path: editor forked pid=%d (stdin detached)\n", (int)ed_pid);
+
+    pid_t pager_pid = fork_pager((int)ed_pid);
+    DBG("pager forked pid=%d\n", (int)pager_pid);
+
+    int probe_status = 0;
     for (int i = 0; i < 15; i++) {
         usleep(10000);
         if (waitpid(ed_pid, &probe_status, WNOHANG) > 0) {
-            DBG("probe: editor exited in %dms (status=%d) — TUI detected\n",
+            DBG("optimistic probe: editor exited in %dms (status=%d) — TUI detected\n",
                 (i + 1) * 10, probe_status);
-            is_tui = 1;
-            break;
+            if (pager_pid > 0) {
+                kill(pager_pid, SIGTERM);
+                waitpid(pager_pid, NULL, 0);
+            }
+            DBG("re-launching as TUI editor (exec with tty)\n");
+            return terminal_editor_path(editor, file);
         }
     }
 
-    if (is_tui) {
-        /* Re-launch with a real terminal */
-        DBG("re-launching as TUI editor (exec with tty)\n");
-        return terminal_editor_path(editor, file);
-    }
-
-    /* Editor still running after 150ms — GUI confirmed.
-     * The probe child IS our editor process. Fork pager alongside. */
-    DBG("probe: editor alive after 150ms — GUI confirmed\n");
-    pid_t pager_pid = fork_pager((int)ed_pid);
-    DBG("pager forked pid=%d\n", (int)pager_pid);
+    DBG("optimistic probe: editor alive after 150ms — GUI confirmed\n");
 
     /* Wait for editor to close */
     int status;
@@ -583,6 +678,20 @@ int main(int argc, char *argv[]) {
     }
     setenv("_CLAUDE_PAGER_ACTIVE", "1", 1);
 
+    /* Claude Code may not export settings env vars to editor process.
+     * If CLAUDE_PAGER_EDITOR_TYPE isn't in env, read it from settings.json. */
+    const char *editor_type = getenv("CLAUDE_PAGER_EDITOR_TYPE");
+    static char settings_editor_type[32];
+    if ((!editor_type || !editor_type[0]) && home &&
+        read_settings_editor_type(home, settings_editor_type,
+                                  sizeof(settings_editor_type)) == 0) {
+        if (strcmp(settings_editor_type, "tui") == 0 ||
+            strcmp(settings_editor_type, "gui") == 0) {
+            setenv("CLAUDE_PAGER_EDITOR_TYPE", settings_editor_type, 1);
+            editor_type = getenv("CLAUDE_PAGER_EDITOR_TYPE");
+        }
+    }
+
     /* Resolve editor: CLAUDE_PAGER_EDITOR (env or settings.json) → VISUAL → EDITOR */
     const char *editor = getenv("CLAUDE_PAGER_EDITOR");
     const char *source = "CLAUDE_PAGER_EDITOR";
@@ -596,6 +705,7 @@ int main(int argc, char *argv[]) {
         }
     }
     DBG("env CLAUDE_PAGER_EDITOR=%s\n", editor ? editor : "(null)");
+    DBG("env CLAUDE_PAGER_EDITOR_TYPE=%s\n", editor_type ? editor_type : "(null)");
     DBG("env VISUAL=%s\n", getenv("VISUAL") ? getenv("VISUAL") : "(null)");
     DBG("env EDITOR=%s\n", getenv("EDITOR") ? getenv("EDITOR") : "(null)");
     if (editor && (!editor[0] || is_self(editor))) {

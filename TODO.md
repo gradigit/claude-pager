@@ -1,14 +1,18 @@
 # TODO
 
-## Deprecate Python pager and bash shims
+## Finish benchmark suite
 
-The C binary now handles everything end-to-end: editor resolution, TUI/GUI detection,
-pager rendering, and transcript finding. The following are dead code:
+Benchmark work is in progress in `benchmarks/` and should remain untracked until complete.
 
-- `src/claude_pager/` — Python pager (replaced by `bin/pager.c`)
-- `shim/claude-pager-shim.sh` — bash editor shim (replaced by `bin/claude-pager-open.c`)
-- `shim/pager-setup.sh` — bash pager launcher (replaced by `fork_pager()` in C)
-- `pyproject.toml` — Python packaging config
-- `tests/` — Python tests
+Before committing benchmark artifacts:
 
-Remove in a future PR after confirming no one depends on the Python entry point.
+- Define final benchmark scenarios and acceptance thresholds
+- Run repeatable Ctrl-G latency benchmarks (cold/warm) and collect outputs
+- Summarize findings and recommended defaults in `benchmarks/FINDINGS.md`
+- Decide which benchmark files should be committed vs kept local-only
+
+## Completed cleanup
+
+- Removed legacy Python pager code (`src/claude_pager/`)
+- Removed legacy shell shims (`shim/claude-pager-shim.sh`, `shim/pager-setup.sh`)
+- Removed Python packaging/test scaffolding (`pyproject.toml`, `tests/`)
