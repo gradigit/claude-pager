@@ -40,6 +40,22 @@ This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` 
 
 Paste `https://github.com/gradigit/claude-pager` into Claude Code or any AI coding agent. The [agent instructions](#agent-instructions) below have everything it needs to install and configure claude-pager automatically.
 
+### Prebuilt binaries (v1.0.0)
+
+If you don't want to compile locally, download release assets from the [v1.0.0 release](https://github.com/gradigit/claude-pager/releases/tag/v1.0.0):
+
+- `claude-pager-v1.0.0-macos-arm64.tar.gz` (Apple Silicon)
+- `claude-pager-v1.0.0-macos-x86_64.tar.gz` (Intel)
+- `checksums.txt`
+
+Then verify:
+
+```sh
+shasum -a 256 -c checksums.txt
+```
+
+Extract the archive and use `bin/claude-pager-open` as your Claude Code editor path.
+
 ## ⚡ Performance
 
 claude-pager is tuned for low-latency Ctrl-G flow, with instrumented timings from a production benchmark run (52 cycles total, 2 warmup excluded, 50 measured).
