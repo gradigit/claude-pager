@@ -12,6 +12,10 @@ Benchmark command and methodology are now stabilized (frozen command + productio
 - Record a short demo video showing Ctrl-G open/close speed and smooth flow
 - Add screenshot/video assets to README and reuse in launch/social posts
 
+## UX parity
+
+- Achieve 1:1 complete visual parity with Claude Code (including diff views, tool outputs, and statusline)
+
 ## Completed cleanup
 
 - Hardened benchmark suite and froze benchmark command defaults
