@@ -2,7 +2,35 @@
 
 A scrollable terminal pager for Claude Code session transcripts. Press **Ctrl-G** in Claude Code and your conversation history renders in the terminal while your GUI editor is open.
 
-The pager is a single compiled C binary — no Python, no Node, no runtime dependencies. Full transcript render in ~5ms.
+The pager is a single compiled C binary — no Python, no Node, no runtime dependencies.
+
+## ⚡ Performance
+
+claude-pager is tuned for low-latency Ctrl-G flow, with instrumented timings from a production benchmark run (52 cycles total, 2 warmup excluded, 50 measured).
+
+### claude-pager internal rendering path (first)
+
+| Component | Median |
+|---|---:|
+| Claude Code exec overhead | **6.3ms** |
+| claude-pager first draw | **2.7ms** |
+| Terminal-ready probe | **0.04ms** |
+
+### Ctrl-G flow timings
+
+| Metric | Median | p95 |
+|---|---:|---:|
+| Ctrl-G → editor window visible | **60.1ms** | **76.1ms** |
+| Cmd-Q → back to Claude Code | **53.1ms** | **61.3ms** |
+
+claude-pager itself is extremely fast; most remaining end-to-end latency is outside claude-pager (external editor + window rendering path).
+
+## ✨ Speed-of-thought editing with TurboDraft
+
+If you want the lowest-latency prompt editing feel, use **TurboDraft** (the sister tool) with claude-pager.
+
+- claude-pager: fast transcript context + Ctrl-G flow
+- TurboDraft: near-instant editing experience once the editor is open
 
 ## Features
 

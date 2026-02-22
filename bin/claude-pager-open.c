@@ -33,6 +33,10 @@ static FILE *dbg;
 static struct timeval t0;
 static void dbg_open(void) {
     gettimeofday(&t0, NULL);
+    char t0_us[32];
+    snprintf(t0_us, sizeof(t0_us), "%lld",
+             (long long)t0.tv_sec * 1000000LL + (long long)t0.tv_usec);
+    setenv("_CLAUDE_PAGER_T0_US", t0_us, 1);
     dbg = fopen("/tmp/claude-pager-open.log", "a");
     if (dbg) setbuf(dbg, NULL);
 }
@@ -209,6 +213,22 @@ static int read_settings_editor_type(const char *home, char *out, size_t outlen)
     return read_settings_env_value(home, "CLAUDE_PAGER_EDITOR_TYPE", out, outlen);
 }
 
+static int read_settings_bench_mode(const char *home, char *out, size_t outlen) {
+    return read_settings_env_value(home, "CLAUDE_PAGER_BENCH", out, outlen);
+}
+
+static int strieq(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+        if (ca != cb) return 0;
+        a++; b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 /* ── Transcript finding (pure C, no process spawns) ────────────────────────── */
 
 static int newest_jsonl(const char *dir, char *out, size_t outlen) {
@@ -326,7 +346,9 @@ static pid_t fork_pager(int watch_pid) {
     if (pid == 0) {
         int tty_fd = open("/dev/tty", O_RDWR);
         if (tty_fd >= 0) {
+            DBG("pager pre-render start\n");
             pre_render(tty_fd);
+            DBG("pager pre-render done\n");
             /* Transcript lookup happens here in the child, overlapping
              * with TurboDraft's window creation in the parent. */
             char transcript[2048] = "";
@@ -381,7 +403,12 @@ static int turbodraft_path(const char *home, const char *file) {
             /* Show pager frame immediately so user sees something
              * while waiting for TurboDraft to restart. */
             int tty = open("/dev/tty", O_RDWR);
-            if (tty >= 0) { pre_render(tty); close(tty); }
+            if (tty >= 0) {
+                DBG("pager placeholder pre-render start\n");
+                pre_render(tty);
+                DBG("pager placeholder pre-render done\n");
+                close(tty);
+            }
         }
         usleep(50000); /* 50ms */
         close(fd);
@@ -692,6 +719,26 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* Optional benchmark probes (pager tcdrain+DSR) */
+    const char *bench_mode = getenv("CLAUDE_PAGER_BENCH");
+    static char settings_bench_mode[32];
+    if ((!bench_mode || !bench_mode[0]) && home &&
+        read_settings_bench_mode(home, settings_bench_mode,
+                                 sizeof(settings_bench_mode)) == 0) {
+        if (strieq(settings_bench_mode, "1") ||
+            strieq(settings_bench_mode, "true") ||
+            strieq(settings_bench_mode, "yes") ||
+            strieq(settings_bench_mode, "on")) {
+            setenv("CLAUDE_PAGER_BENCH", "1", 1);
+        } else if (strieq(settings_bench_mode, "0") ||
+                   strieq(settings_bench_mode, "false") ||
+                   strieq(settings_bench_mode, "no") ||
+                   strieq(settings_bench_mode, "off")) {
+            setenv("CLAUDE_PAGER_BENCH", "0", 1);
+        }
+        bench_mode = getenv("CLAUDE_PAGER_BENCH");
+    }
+
     /* Resolve editor: CLAUDE_PAGER_EDITOR (env or settings.json) → VISUAL → EDITOR */
     const char *editor = getenv("CLAUDE_PAGER_EDITOR");
     const char *source = "CLAUDE_PAGER_EDITOR";
@@ -706,6 +753,7 @@ int main(int argc, char *argv[]) {
     }
     DBG("env CLAUDE_PAGER_EDITOR=%s\n", editor ? editor : "(null)");
     DBG("env CLAUDE_PAGER_EDITOR_TYPE=%s\n", editor_type ? editor_type : "(null)");
+    DBG("env CLAUDE_PAGER_BENCH=%s\n", bench_mode ? bench_mode : "(null)");
     DBG("env VISUAL=%s\n", getenv("VISUAL") ? getenv("VISUAL") : "(null)");
     DBG("env EDITOR=%s\n", getenv("EDITOR") ? getenv("EDITOR") : "(null)");
     if (editor && (!editor[0] || is_self(editor))) {

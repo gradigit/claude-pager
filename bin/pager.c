@@ -11,11 +11,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
+#include <errno.h>
 
 /* ── ANSI ──────────────────────────────────────────────────────────────── */
 
@@ -65,6 +68,106 @@ static int g_cols = 100, g_rows = 24, g_crows = 21;
 static int g_fd = -1;
 static struct termios g_old;
 static volatile sig_atomic_t g_resize = 0, g_quit = 0;
+static FILE *g_dbg = NULL;
+static long long g_log_t0_us = 0;
+static int g_bench_mode = 0;
+
+static long long now_us(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000000LL + (long long)tv.tv_usec;
+}
+
+static void dbg_open(void) {
+    if (g_dbg) return;
+    g_dbg = fopen("/tmp/claude-pager-open.log", "a");
+    if (!g_dbg) return;
+    setbuf(g_dbg, NULL);
+    const char *t0 = getenv("_CLAUDE_PAGER_T0_US");
+    if (t0 && *t0) {
+        char *end = NULL;
+        long long parsed = strtoll(t0, &end, 10);
+        if (end && *end == '\0' && parsed > 0) g_log_t0_us = parsed;
+    }
+    if (g_log_t0_us <= 0) g_log_t0_us = now_us();
+}
+
+static double log_elapsed_ms(void) {
+    long long n = now_us();
+    if (g_log_t0_us <= 0) g_log_t0_us = n;
+    return (double)(n - g_log_t0_us) / 1000.0;
+}
+
+static void PDBG(const char *fmt, ...) {
+    if (!g_dbg) dbg_open();
+    if (!g_dbg) return;
+    fprintf(g_dbg, "[%7.2fms] pager: ", log_elapsed_ms());
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_dbg, fmt, ap);
+    va_end(ap);
+}
+
+static int env_enabled(const char *name) {
+    const char *v = getenv(name);
+    if (!v || !*v) return 0;
+    return strcmp(v, "1") == 0 ||
+           strcasecmp(v, "true") == 0 ||
+           strcasecmp(v, "yes") == 0 ||
+           strcasecmp(v, "on") == 0;
+}
+
+static void bench_probe_terminal_ready(int tty_fd, const char *label) {
+    if (!g_bench_mode || tty_fd < 0) return;
+
+    long long t0 = now_us();
+    if (tcdrain(tty_fd) != 0) {
+        PDBG("bench term-ready label=%s tcdrain_err=%d\n", label, errno);
+        return;
+    }
+    long long t1 = now_us();
+
+    static const char dsr[] = "\033[6n";
+    if (write(tty_fd, dsr, sizeof(dsr) - 1) < 0) {
+        PDBG("bench term-ready label=%s dsr_write_err=%d\n", label, errno);
+        return;
+    }
+    long long t2 = now_us();
+
+    int ok = 0;
+    int got = 0;
+    char c = 0;
+    long long deadline = now_us() + 250000; /* 250ms */
+    while (now_us() < deadline) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(tty_fd, &rfds);
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 10000; /* 10ms */
+        int r = select(tty_fd + 1, &rfds, NULL, NULL, &tv);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) continue;
+        if (!FD_ISSET(tty_fd, &rfds)) continue;
+        ssize_t n = read(tty_fd, &c, 1);
+        if (n <= 0) continue;
+        got += 1;
+        if (c == 'R') { ok = 1; break; }
+    }
+    long long t3 = now_us();
+
+    PDBG(
+        "bench term-ready label=%s tcdrain=%.2fms dsr=%.2fms total=%.2fms ok=%d bytes=%d\n",
+        label,
+        (double)(t1 - t0) / 1000.0,
+        (double)(t3 - t2) / 1000.0,
+        (double)(t3 - t0) / 1000.0,
+        ok, got
+    );
+}
 
 static void geo_update(void) {
     struct winsize ws;
@@ -946,6 +1049,12 @@ static int poll_input(int fd) {
 void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit) {
     g_fd = tty_fd;
     if (ctx_limit <= 0) ctx_limit = 200000;
+    g_bench_mode = env_enabled("CLAUDE_PAGER_BENCH");
+    dbg_open();
+    PDBG("run start transcript=%s editor_pid=%d ctx_limit=%d\n",
+         (transcript && transcript[0]) ? transcript : "(none)",
+         editor_pid, ctx_limit);
+    if (g_bench_mode) PDBG("bench probes enabled\n");
 
     signal(SIGTERM, on_term);
     signal(SIGWINCH, on_winch);
@@ -959,6 +1068,8 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
     int tok = 0; double pct = 0;
     double last_mt = 0;
     int first = 1;
+    int first_draw_logged = 0;
+    int load_seq = 0;
 
     while (!g_quit) {
         if (editor_pid > 0 && kill(editor_pid, 0) != 0) break;
@@ -974,13 +1085,24 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
             if (stat(transcript, &st)==0 && (double)st.st_mtime != last_mt) {
                 last_mt = (double)st.st_mtime;
                 cc = 1;
+                load_seq++;
                 Items items; memset(&items, 0, sizeof(items));
                 tok = 0; pct = 0;
+                long long t_parse0 = now_us();
+                PDBG("parse start load=%d\n", load_seq);
                 parse_transcript(transcript, &items, &tok, &pct, ctx_limit);
+                long long t_parse1 = now_us();
+                PDBG("parse end load=%d duration=%.2fms tok=%d pct=%.3f\n",
+                     load_seq, (double)(t_parse1 - t_parse0) / 1000.0, tok, pct);
                 L_free(&L);
+                long long t_render0 = now_us();
+                PDBG("markdown render start load=%d\n", load_seq);
                 render_items(&L, &items);
+                long long t_render1 = now_us();
                 L_push(&L, C_HDM "  " HL HL HL " end of transcript " HL HL HL RS);
                 L_push(&L, ""); L_push(&L, "");
+                PDBG("markdown render end load=%d duration=%.2fms lines=%d\n",
+                     load_seq, (double)(t_render1 - t_render0) / 1000.0, L.n);
                 I_free(&items);
                 if (!uscroll) { int b = L.n-(g_crows-1); off = b>0 ? b : 0; }
             }
@@ -1003,11 +1125,20 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
             uscroll = 1; sc = 1;
         }
 
-        if (cc || sc || first) { draw(&L, off, tok, pct, ctx_limit, first); first=0; }
+        if (cc || sc || first) {
+            draw(&L, off, tok, pct, ctx_limit, first);
+            if (!first_draw_logged && first) {
+                PDBG("first draw done off=%d lines=%d\n", off, L.n);
+                bench_probe_terminal_ready(tty_fd, "first_draw");
+                first_draw_logged = 1;
+            }
+            first = 0;
+        }
 
         usleep(sc ? 16000 : 50000);
     }
 
+    PDBG("run end\n");
     term_restore();
     L_free(&L);
 }
