@@ -2,54 +2,16 @@
 
 A scrollable terminal pager for Claude Code session transcripts. Press **Ctrl-G** in Claude Code and your conversation history renders in the terminal while your GUI editor is open.
 
-The pager is a single compiled C binary — no Python, no Node, no runtime dependencies.
+claude-pager solves two major Ctrl-G pain points:
 
-## ⚡ Performance
+- Claude Code’s TUI going blank while an external GUI editor is open
+- Broken Cmd-click behavior on long wrapped links in terminal output
 
-claude-pager is tuned for low-latency Ctrl-G flow, with instrumented timings from a production benchmark run (52 cycles total, 2 warmup excluded, 50 measured).
+It does this with a native C pager + OSC-8 hyperlinks, so wrapped URLs and file paths stay clickable.
 
-### claude-pager internal rendering path (first)
+The runtime is a single compiled C binary — no Python, no Node, no runtime dependencies.
 
-| Component | Median |
-|---|---:|
-| Claude Code exec overhead | **6.3ms** |
-| claude-pager first draw | **2.7ms** |
-| Terminal-ready probe | **0.04ms** |
-
-### Ctrl-G flow timings
-
-| Metric | Median | p95 |
-|---|---:|---:|
-| Ctrl-G → editor window visible | **60.1ms** | **76.1ms** |
-| Cmd-Q → back to Claude Code | **53.1ms** | **61.3ms** |
-
-claude-pager itself is extremely fast; most remaining end-to-end latency is outside claude-pager (external editor + window rendering path).
-
-## ✨ Speed-of-thought editing with TurboDraft
-
-If you want the lowest-latency prompt editing feel, use **TurboDraft** (the sister tool) with claude-pager.
-
-- claude-pager: fast transcript context + Ctrl-G flow
-- TurboDraft: near-instant editing experience once the editor is open
-
-## Features
-
-- Scrollable viewport with mouse wheel and keyboard navigation
-- Markdown rendering: headings, bold, inline code, code blocks, lists
-- Diff coloring (+green / -red / @@cyan)
-- Context usage bar showing token consumption
-- Live-follow mode: content updates as the transcript grows
-- Terminal resize support (SIGWINCH)
-- Works with any GUI editor (TurboDraft, VS Code, Sublime, etc.)
-- TurboDraft fast path: talks directly to TurboDraft's Unix socket, bypassing all shell overhead
-
-## Requirements
-
-- macOS (arm64 or x86_64)
-- A C compiler (Xcode Command Line Tools: `xcode-select --install`)
-- `jq` (installed automatically via Homebrew if missing)
-
-## Install
+## Install (quick start)
 
 ### One-liner
 
@@ -63,7 +25,57 @@ This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` 
 
 Paste `https://github.com/gradigit/claude-pager` into Claude Code or any AI coding agent. The [agent instructions](#agent-instructions) below have everything it needs to install and configure claude-pager automatically.
 
-### Manual install
+## ⚡ Performance
+
+claude-pager is tuned for low-latency Ctrl-G flow, with instrumented timings from a production benchmark run (52 cycles total, 2 warmup excluded, 50 measured).
+
+### claude-pager internal rendering timings
+
+| Component | Median |
+|---|---:|
+| Claude Code exec overhead | **6.3ms** |
+| claude-pager first draw | **2.7ms** |
+| Terminal-ready probe | **0.04ms** |
+
+### Ctrl-G flow timings (TurboDraft fast path)
+
+| Metric | Median | p95 |
+|---|---:|---:|
+| Ctrl-G → editor window visible | **60.1ms** | **76.1ms** |
+| Cmd-Q → back to Claude Code | **53.1ms** | **61.3ms** |
+
+These Ctrl-G flow timings are measured with TurboDraft using claude-pager’s direct Unix-socket fast path. Other popular GUI editors go through the generic launch/wait path and typically do **not** hit sub-100ms Ctrl-G end-to-end flow timings.
+
+claude-pager itself is extremely fast; most remaining end-to-end latency is outside claude-pager (external editor + window rendering path).
+
+## ✨ Speed-of-thought editing with TurboDraft
+
+If you want the lowest-latency prompt editing feel, use **[TurboDraft](https://github.com/gradigit/turbodraft)** (the sister tool) with claude-pager.
+
+- claude-pager: fast transcript context + Ctrl-G flow
+- TurboDraft: near-instant editing experience once the editor is open
+
+## Features
+
+- Keeps your terminal transcript visible while GUI editors are open (no blank Ctrl-G screen)
+- Scrollable viewport with mouse wheel and keyboard navigation
+- Markdown rendering: headings, bold, inline code, code blocks, lists
+- Diff coloring (+green / -red / @@cyan)
+- Context usage bar showing token consumption
+- Live-follow mode: content updates as the transcript grows
+- OSC-8 hyperlink rendering so long wrapped links remain Cmd-clickable
+- OSC-8 file/path hyperlink rendering so local paths are easy to open
+- Terminal resize support (SIGWINCH)
+- Works with any GUI editor (TurboDraft, VS Code, Sublime, etc.)
+- TurboDraft fast path: talks directly to TurboDraft's Unix socket, bypassing all shell overhead
+
+## Requirements
+
+- macOS (arm64 or x86_64)
+- A C compiler (Xcode Command Line Tools: `xcode-select --install`)
+- `jq` (installed automatically via Homebrew if missing)
+
+## Build from source (manual)
 
 ```sh
 git clone https://github.com/gradigit/claude-pager.git

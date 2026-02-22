@@ -8,6 +8,12 @@ Benchmark command and methodology are now stabilized (frozen command + productio
 - Commit benchmark suite/docs once final public write-up language is approved
 - Optional: add a repeatable gate script/check target for regression testing
 
+## README / launch assets
+
+- Capture polished screenshots showing transcript rendering + clickable wrapped links/file paths
+- Record a short demo video showing Ctrl-G open/close speed and smooth flow
+- Add screenshot/video assets to README and reuse in launch/social posts
+
 ## Completed cleanup
 
 - Hardened benchmark suite and froze benchmark command defaults
