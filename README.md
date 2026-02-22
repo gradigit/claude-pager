@@ -11,6 +11,21 @@ It does this with a native C pager + OSC-8 hyperlinks, so wrapped URLs and file 
 
 The runtime is a single compiled C binary — no Python, no Node, no runtime dependencies.
 
+## Before vs After: clickable links and file paths
+
+<table>
+  <tr>
+    <td align="center"><strong>Before</strong></td>
+    <td align="center"><strong>After (claude-pager)</strong></td>
+  </tr>
+  <tr>
+    <td><img src="assets/readme/osc8-before.png" alt="Before: raw, hard-to-click links and file paths in terminal output" width="460"></td>
+    <td><img src="assets/readme/osc8-after.png" alt="After: shortened clickable OSC-8 links and file paths in claude-pager" width="460"></td>
+  </tr>
+</table>
+
+<sub>claude-pager shortens and wraps links and file paths into clickable OSC-8 hyperlinks, and keeps mouse scrolling just like regular Claude Code session context.</sub>
+
 ## Install (quick start)
 
 ### One-liner
