@@ -16,6 +16,16 @@ Benchmark command and methodology are now stabilized (frozen command + productio
 
 - Achieve 1:1 complete visual parity with Claude Code (including diff views, tool outputs, and statusline)
 
+## V2 experimental track (Ghostty-first)
+
+- [ ] Build a Ghostty parity mode for richer diff rendering (file headers, hunk headers, old/new line gutters)
+- [ ] Add hunk-level file anchors with displayed line references for quick jump/open
+- [ ] Improve tool output fidelity (less aggressive truncation, better block framing)
+- [ ] Polish statusline/theme to match Claude Code feel
+- [ ] Capture before/after visual comparison screenshots for each parity milestone
+- [ ] Run regression latency benchmarks against v1 frozen command and compare medians/p95
+- [ ] Publish V2 parity + performance comparison report before merge decision
+
 ## Completed cleanup
 
 - Hardened benchmark suite and froze benchmark command defaults
