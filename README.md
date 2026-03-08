@@ -63,7 +63,7 @@ claude-pager is tuned for low-latency Ctrl-G flow, with instrumented timings fro
 ### claude-pager internal rendering timings
 
 | Component | Median |
-|---|---:|
+| --- | ---: |
 | Claude Code exec overhead | **6.3ms** |
 | claude-pager first draw | **2.7ms** |
 | Terminal-ready probe | **0.04ms** |
@@ -71,7 +71,7 @@ claude-pager is tuned for low-latency Ctrl-G flow, with instrumented timings fro
 ### Ctrl-G flow timings (TurboDraft fast path)
 
 | Metric | Median | p95 |
-|---|---:|---:|
+| --- | ---: | ---: |
 | Ctrl-G → editor window visible | **60.1ms** | **76.1ms** |
 | Cmd-Q → back to Claude Code | **53.1ms** | **61.3ms** |
 
@@ -81,7 +81,7 @@ claude-pager itself is extremely fast; most remaining end-to-end latency is outs
 
 ## ✨ Speed-of-thought editing with TurboDraft
 
-If you want the lowest-latency prompt editing feel, use **[TurboDraft](https://github.com/gradigit/turbodraft)** (the sister tool) with claude-pager.
+If you want the lowest-latency prompt editing feel, use [**TurboDraft**](https://github.com/gradigit/turbodraft) (the sister tool) with claude-pager.
 
 - claude-pager: fast transcript context + Ctrl-G flow
 - TurboDraft: near-instant editing experience once the editor is open
@@ -91,14 +91,20 @@ If you want the lowest-latency prompt editing feel, use **[TurboDraft](https://g
 - Keeps your terminal transcript visible while GUI editors are open (no blank Ctrl-G screen)
 - Scrollable viewport with mouse wheel and keyboard navigation
 - Markdown rendering: headings, bold, inline code, code blocks, lists
+- GFM-style table rendering with bounded row/column budgets for predictable performance
 - Diff coloring (+green / -red / @@cyan)
 - Context usage bar showing token consumption
 - Live-follow mode: content updates as the transcript grows
 - OSC-8 hyperlink rendering so long wrapped links remain Cmd-clickable
 - OSC-8 file/path hyperlink rendering so local paths are easy to open
+- Boxed multiline prompt composer is active by default while browsing transcript
+- Composer auto-wraps and expands vertically for longer prompts
+- File/image path references auto-prepended as `@/absolute/path` when pasted into queue input
+- `Ctrl+V` in queue input can attach clipboard files (Finder copy) and clipboard images as `@` references
+- Drag-and-drop file paths into queue input are accepted as `@` references
 - Terminal resize support (SIGWINCH)
 - Works with any GUI editor (TurboDraft, VS Code, Sublime, etc.)
-- TurboDraft fast path: talks directly to TurboDraft's Unix socket, bypassing all shell overhead
+- TurboDraft fast path: talks directly to TurboDraft's Unix socket, bypassing shell overhead and handing off session-scoped queue metadata
 
 ## Requirements
 
@@ -173,7 +179,7 @@ Your editor is stored in `env.CLAUDE_PAGER_EDITOR` in `~/.claude/settings.json`.
 Common values:
 
 | Editor | Value |
-|---|---|
+| --- | --- |
 | VS Code | `code --wait` |
 | Cursor | `cursor --wait` |
 | Zed | `zed --wait` |
@@ -190,13 +196,19 @@ You can force the path with `CLAUDE_PAGER_EDITOR_TYPE=tui` or `CLAUDE_PAGER_EDIT
 ## Key Bindings
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | Scroll wheel | Scroll up/down |
-| Arrow Up/Down | Scroll one line |
+| Arrow keys (in composer) | Move caret and edit wrapped prompt text |
 | Page Up/Down | Scroll one page |
-| Home | Jump to top |
-| End | Jump to bottom |
-| q | Quit pager |
+| Home / End (in composer) | Jump caret to start / end |
+| Shift+Up / Shift+Down | Cycle queued prompts and load selected one for editing |
+| Shift+Enter (in composer) | Insert a newline into the queued prompt |
+| Ctrl+D (in input mode) | Remove selected queued prompt |
+| Ctrl+V (in input mode) | Attach clipboard file/image as `@/absolute/path` reference |
+| Enter (in input mode) | Queue prompt or update the selected queued prompt |
+| Esc (in input mode) | Restore stashed draft or clear current input text |
+| Mouse / Page Up / Page Down | Browse transcript while input stays active |
+| Ctrl+Q | Close the active TurboDraft session immediately on the TurboDraft fast path |
 
 ## How It Works
 
@@ -204,10 +216,11 @@ When you press Ctrl-G in Claude Code:
 
 1. Claude Code opens an alt screen and spawns the editor shim
 2. The C binary finds your session transcript via a tty-keyed temp file (~0.1ms)
-3. If TurboDraft is available: connects to its socket and sends `session.open` (~0.02ms)
+3. If TurboDraft is available: connects to its socket and sends `session.open` (~0.02ms) with `cwd`, protocol version, and session-scoped queue metadata
 4. It forks and renders the pager directly in C (~3ms for pre-render, ~5ms for full transcript)
 5. Your editor opens the file — the pager is already visible
-6. On close: the binary detects the editor exited, kills the pager, and returns control to Claude Code
+6. On `Ctrl+Q` in the TurboDraft fast path: the pager requests `turbodraft.session.close` for the active session and waits for `turbodraft.session.wait`
+7. On close: once the session actually closes, the binary kills the pager and returns control to Claude Code
 
 The pager uses alternate scroll mode (`\033[?1007h`) instead of mouse tracking, so OSC-8 hyperlinks remain Cmd+clickable.
 
