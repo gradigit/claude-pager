@@ -166,6 +166,7 @@ static FileStamp g_queue_stamp = {0};
 static char g_queue_path[PATH_MAX] = "";
 static char g_queue_fingerprint[17] = "";
 static int g_queue_enabled = 0;
+static int g_ctrl_quit_supported = 0;
 static int g_input_mode = 0;
 static char g_input_buf[QUEUE_INPUT_MAX];
 static int g_input_len = 0;
@@ -5135,15 +5136,19 @@ static void draw_hotkeys_footer(void) {
         footer_emit_plain(" attach  ", &used, maxw);
         footer_emit_styled(C_QACC, "^D", &used, maxw);
         footer_emit_plain(" del  ", &used, maxw);
-        footer_emit_styled(C_QACC, "^Q", &used, maxw);
-        footer_emit_plain(" close", &used, maxw);
+        if (g_ctrl_quit_supported) {
+            footer_emit_styled(C_QACC, "^Q", &used, maxw);
+            footer_emit_plain(" close", &used, maxw);
+        }
     } else {
         footer_emit_plain("  ", &used, maxw);
         footer_emit_styled(C_HDM, "keys: ", &used, maxw);
         footer_emit_styled(C_QACC, "⇧↑/↓", &used, maxw);
         footer_emit_plain(" cycle/edit  ", &used, maxw);
-        footer_emit_styled(C_QACC, "^Q", &used, maxw);
-        footer_emit_plain(" close", &used, maxw);
+        if (g_ctrl_quit_supported) {
+            footer_emit_styled(C_QACC, "^Q", &used, maxw);
+            footer_emit_plain(" close", &used, maxw);
+        }
     }
     ob(RS);
 }
@@ -5517,6 +5522,7 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
     g_last_capped_lines = 0;
     g_queue_rows = 0;
     g_queue_enabled = 0;
+    g_ctrl_quit_supported = (control_fd >= 0);
     g_queue_stamp.valid = 0;
     g_input_mode = 0;
     input_clear_buffer();
@@ -5645,7 +5651,7 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
                 char cmd = 'q';
                 if (write_all(control_fd, &cmd, 1) == 0) {
                     queue_set_notice("closing TurboDraft session");
-                    g_quit = 1;
+                    sc = 1;
                 } else {
                     queue_set_notice("session close failed");
                     sc = 1;

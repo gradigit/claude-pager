@@ -10,7 +10,17 @@ dist/
 bin/claude-pager-open
 bin/claude-pager-c
 bin/test_linkify
+benchmarks/
+docs/
+results/
+assets/parity/
+benchmarks/probe_sync_2026
+benchmarks/.tmp/
+bin/*.plist
 
 # Handoff artifacts
 HANDOFF.md
 .handoff-fresh/
+
+# Local planning file
+TODO.md

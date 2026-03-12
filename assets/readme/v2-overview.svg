@@ -1,0 +1,118 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">claude-pager v2 overview</title>
+  <desc id="desc">Overview graphic showing claude-pager v2 transcript rendering, queue composer, clickable links, and TurboDraft integration.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0E1117"/>
+      <stop offset="1" stop-color="#090B10"/>
+    </linearGradient>
+    <linearGradient id="hero" x1="0" y1="0" x2="0" y2="580" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#171B22"/>
+      <stop offset="1" stop-color="#11151B"/>
+    </linearGradient>
+    <linearGradient id="pill" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#7DD3FC"/>
+      <stop offset="1" stop-color="#86EFAC"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="1200" height="760" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+    <style>
+      .title { font: 700 34px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #F8FAFC; }
+      .subtitle { font: 500 15px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #CBD5E1; }
+      .mono { font: 500 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #E5E7EB; }
+      .muted { font: 500 13px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #94A3B8; }
+      .cardTitle { font: 700 18px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #E5E7EB; }
+      .cardBody { font: 500 14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #CBD5E1; }
+      .smallCaps { font: 700 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #082F49; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" rx="28" fill="url(#bg)"/>
+
+  <text x="56" y="68" class="title">claude-pager v2</text>
+  <text x="56" y="98" class="subtitle">Ctrl-G opens transcript context, a built-in prompt composer, and faster</text>
+  <text x="56" y="122" class="subtitle">TurboDraft-backed edit flow without blanking the terminal.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="56" y="132" width="744" height="592" rx="24" fill="url(#hero)" stroke="#242B36"/>
+    <rect x="56" y="132" width="744" height="36" rx="24" fill="#202531"/>
+    <circle cx="84" cy="150" r="6" fill="#FB7185"/>
+    <circle cx="104" cy="150" r="6" fill="#FBBF24"/>
+    <circle cx="124" cy="150" r="6" fill="#4ADE80"/>
+
+    <text x="84" y="196" class="muted">↕ 1593 lines above (scroll to view)</text>
+    <text x="84" y="234" class="mono">• Update(.../src/fee_checker/utils/rate_limit.py)</text>
+
+    <rect x="84" y="254" width="650" height="28" rx="6" fill="#6B1F1F"/>
+    <rect x="84" y="284" width="650" height="28" rx="6" fill="#1F6A37"/>
+    <text x="100" y="273" class="mono">118-  \"spot\": PoolConfig(max_requests=4000, window_seconds=30, …)</text>
+    <text x="100" y="303" class="mono">118+  \"spot\": PoolConfig(max_requests=3200, window_seconds=30, …)</text>
+
+    <rect x="84" y="346" width="360" height="184" rx="10" fill="#131821" stroke="#475569"/>
+    <path d="M84 384H444M84 422H444M84 460H444M84 498H444" stroke="#475569"/>
+    <path d="M176 346V530M286 346V530M366 346V530" stroke="#475569"/>
+    <text x="102" y="372" class="mono">Exchange</text>
+    <text x="194" y="372" class="mono">Pool</text>
+    <text x="304" y="372" class="mono">Now</text>
+    <text x="384" y="372" class="mono">Headroom</text>
+    <text x="102" y="410" class="mono">Binance</text>
+    <text x="194" y="410" class="mono">spot</text>
+    <text x="304" y="410" class="mono">4800/60s</text>
+    <text x="384" y="410" class="mono">20%</text>
+    <text x="102" y="448" class="mono">KuCoin</text>
+    <text x="194" y="448" class="mono">spot</text>
+    <text x="304" y="448" class="mono">3200/30s</text>
+    <text x="384" y="448" class="mono">20%</text>
+
+    <text x="84" y="576" class="mono">/remote-control is active. Code in CLI or at</text>
+    <text x="84" y="604" class="mono" fill="#FBBF24">https://claude.ai/code/session_012EkwWrjs43EYr1AFBS3QZ</text>
+    <text x="84" y="626" class="muted">— end of transcript —</text>
+
+    <rect x="84" y="632" width="688" height="1" fill="#334155"/>
+    <rect x="84" y="646" width="688" height="1" fill="#334155"/>
+    <text x="84" y="666" class="muted">• Queue(2)</text>
+    <text x="152" y="666" class="muted">1. tighten diff colors</text>
+    <text x="354" y="666" class="muted">2. add release screenshot</text>
+
+    <rect x="84" y="682" width="688" height="36" rx="10" fill="#0B1220" stroke="#60A5FA"/>
+    <rect x="98" y="672" width="60" height="18" rx="8" fill="#101827" stroke="#334155"/>
+    <text x="111" y="685" class="muted">Prompt</text>
+    <text x="102" y="706" class="mono">match claude code diff colors more closely</text>
+  </g>
+
+
+  <path d="M800 262 C820 262 830 262 852 262" stroke="#365D92" stroke-width="2" opacity="0.8"/>
+  <path d="M772 697 C815 697 826 422 852 422" stroke="#2F7E68" stroke-width="2" opacity="0.78"/>
+  <path d="M772 604 C818 604 828 580 852 580" stroke="#8A6A18" stroke-width="2" opacity="0.78"/>
+  <rect x="852" y="154" width="286" height="34" rx="17" fill="url(#pill)"/>
+  <text x="870" y="176" class="smallCaps">WHAT'S NEW IN V2</text>
+
+  <g>
+    <rect x="852" y="210" width="286" height="118" rx="18" fill="#0F1622" stroke="#2B3A4D"/>
+    <circle cx="878" cy="242" r="6" fill="#60A5FA"/>
+    <text x="896" y="248" class="cardTitle">Transcript rendering</text>
+    <text x="878" y="276" class="cardBody">Markdown, diffs, tables, clickable</text>
+    <text x="878" y="298" class="cardBody">links, and file paths stay visible</text>
+    <text x="878" y="320" class="cardBody">while your editor is open.</text>
+  </g>
+
+  <g>
+    <rect x="852" y="352" width="286" height="140" rx="18" fill="#0F1622" stroke="#28493D"/>
+    <circle cx="878" cy="384" r="6" fill="#34D399"/>
+    <text x="896" y="390" class="cardTitle">Queue + composer</text>
+    <text x="878" y="418" class="cardBody">Draft prompts inside the pager,</text>
+    <text x="878" y="440" class="cardBody">use ⇧Enter for multiline input,</text>
+    <text x="878" y="462" class="cardBody">and cycle or edit queued prompts</text>
+    <text x="878" y="484" class="cardBody">without leaving Ctrl-G.</text>
+  </g>
+
+  <g>
+    <rect x="852" y="516" width="286" height="128" rx="18" fill="#0F1622" stroke="#4A3C22"/>
+    <circle cx="878" cy="548" r="6" fill="#FBBF24"/>
+    <text x="896" y="554" class="cardTitle">Fast path + UX</text>
+    <text x="878" y="582" class="cardBody">TurboDraft socket path, click/Cmd-click</text>
+    <text x="878" y="604" class="cardBody">links, scroll wheel browsing, and</text>
+    <text x="878" y="626" class="cardBody">Shift-drag text selection.</text>
+  </g>
+</svg>

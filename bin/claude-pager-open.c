@@ -544,10 +544,22 @@ static int turbodraft_path(const char *home, const char *file) {
                          "\"method\":\"turbodraft.session.close\","
                          "\"params\":{\"sessionId\":\"%s\"}}",
                          session_id);
-                if (send_msg(fd, close_msg) != 0) {
-                    DBG("session.close send failed: %s\n", strerror(errno));
+                int close_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+                if (close_fd < 0) {
+                    DBG("session.close socket create failed: %s\n", strerror(errno));
                 } else {
-                    DBG("session.close sent\n");
+                    struct sockaddr_un close_addr;
+                    memset(&close_addr, 0, sizeof(close_addr));
+                    close_addr.sun_family = AF_UNIX;
+                    strncpy(close_addr.sun_path, sock_path, sizeof(close_addr.sun_path) - 1);
+                    if (connect(close_fd, (struct sockaddr *)&close_addr, sizeof(close_addr)) != 0) {
+                        DBG("session.close connect failed: %s\n", strerror(errno));
+                    } else if (send_msg(close_fd, close_msg) != 0) {
+                        DBG("session.close send failed: %s\n", strerror(errno));
+                    } else {
+                        DBG("session.close sent on dedicated close socket\n");
+                    }
+                    close(close_fd);
                 }
             } else if (n == 0) {
                 /* Pager exited/closed pipe; keep waiting on session.wait. */

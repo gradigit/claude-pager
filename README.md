@@ -26,6 +26,16 @@ The runtime is a single compiled C binary — no Python, no Node, no runtime dep
 
 <sub>claude-pager shortens and wraps links and file paths into clickable OSC-8 hyperlinks, and keeps mouse scrolling just like regular Claude Code session context.</sub>
 
+## What's New in v2
+
+<img src="assets/readme/v2-overview.svg" alt="claude-pager v2 overview with transcript rendering, built-in prompt composer, queue editing, clickable links, and TurboDraft fast path" width="100%">
+
+- **Built-in queued prompt composer** right inside the pager, so Ctrl-G no longer means read-only transcript context
+- **Multiline prompt drafting** with **Shift+Enter**, plus queue cycle/edit/remove controls
+- **Clipboard + drag/drop attachments** that turn pasted files and images into `@/absolute/path` references
+- **TurboDraft fast path** for low-latency session open/close over a direct Unix socket
+- **Interactive terminal ergonomics**: scroll wheel browsing, click/Cmd-click links, and Shift-drag text selection
+
 ## Install (quick start)
 
 ### One-liner
@@ -38,7 +48,7 @@ This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` 
 
 ### AI agent install
 
-Paste `https://github.com/gradigit/claude-pager` into Claude Code or any AI coding agent. The [agent instructions](#agent-instructions) below have everything it needs to install and configure claude-pager automatically.
+Paste the repo URL into Claude Code or any AI coding agent. The [agent instructions](#agent-instructions) below have everything it needs to install and configure claude-pager automatically.
 
 ### Prebuilt binaries (v1.0.0)
 
@@ -94,8 +104,7 @@ If you want the lowest-latency prompt editing feel, use [**TurboDraft**](https:/
 - GFM-style table rendering with bounded row/column budgets for predictable performance
 - Diff coloring (+green / -red / @@cyan)
 - Context usage bar showing token consumption
-- Live-follow mode: content updates as the transcript grows
-- OSC-8 hyperlink rendering so long wrapped links remain Cmd-clickable
+- OSC-8 hyperlink rendering so long wrapped links remain easy to open
 - OSC-8 file/path hyperlink rendering so local paths are easy to open
 - Boxed multiline prompt composer is active by default while browsing transcript
 - Composer auto-wraps and expands vertically for longer prompts
@@ -198,6 +207,8 @@ You can force the path with `CLAUDE_PAGER_EDITOR_TYPE=tui` or `CLAUDE_PAGER_EDIT
 | Key | Action |
 | --- | --- |
 | Scroll wheel | Scroll up/down |
+| Click / Cmd-click | Open hovered OSC-8 link or file path |
+| Shift-drag | Select transcript text while mouse interactions stay enabled |
 | Arrow keys (in composer) | Move caret and edit wrapped prompt text |
 | Page Up/Down | Scroll one page |
 | Home / End (in composer) | Jump caret to start / end |
@@ -222,7 +233,7 @@ When you press Ctrl-G in Claude Code:
 6. On `Ctrl+Q` in the TurboDraft fast path: the pager requests `turbodraft.session.close` for the active session and waits for `turbodraft.session.wait`
 7. On close: once the session actually closes, the binary kills the pager and returns control to Claude Code
 
-The pager uses alternate scroll mode (`\033[?1007h`) instead of mouse tracking, so OSC-8 hyperlinks remain Cmd+clickable.
+The pager keeps mouse interactions enabled for scroll-wheel browsing, link activation, and Shift-drag text selection.
 
 ## Architecture
 
