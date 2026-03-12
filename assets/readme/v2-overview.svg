@@ -73,7 +73,7 @@
     <rect x="84" y="646" width="688" height="1" fill="#334155"/>
     <text x="84" y="666" class="muted">• Queue(2)</text>
     <text x="152" y="666" class="muted">1. tighten diff colors</text>
-    <text x="354" y="666" class="muted">2. add release screenshot</text>
+    <text x="354" y="666" class="muted">2. refine prompt wording</text>
 
     <rect x="84" y="682" width="688" height="36" rx="10" fill="#0B1220" stroke="#60A5FA"/>
     <rect x="98" y="672" width="60" height="18" rx="8" fill="#101827" stroke="#334155"/>
