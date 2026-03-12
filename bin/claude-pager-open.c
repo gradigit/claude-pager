@@ -20,12 +20,15 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
+#include <limits.h>
 
 #include "pager.h"
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+
+static const int kTurboDraftProtocolVersion = 1;
 
 /* ── Debug logging ─────────────────────────────────────────────────────────── */
 
@@ -341,7 +344,7 @@ static void pre_render(int tty_fd) {
 
 /* ── Fork pager child ──────────────────────────────────────────────────────── */
 
-static pid_t fork_pager(int watch_pid) {
+static pid_t fork_pager(int watch_pid, int control_fd) {
     pid_t pid = fork();
     if (pid == 0) {
         int tty_fd = open("/dev/tty", O_RDWR);
@@ -354,11 +357,12 @@ static pid_t fork_pager(int watch_pid) {
             char transcript[2048] = "";
             const char *home = getenv("HOME");
             if (home) find_transcript(home, transcript, sizeof(transcript));
-            run_pager(tty_fd, transcript, watch_pid, 200000);
+            run_pager(tty_fd, transcript, watch_pid, 200000, control_fd);
             close(tty_fd);
         }
         _exit(0);
     }
+    if (control_fd >= 0) close(control_fd);
     return pid;
 }
 
@@ -428,29 +432,75 @@ static int turbodraft_path(const char *home, const char *file) {
     /* Send session.open */
     char escaped[2048];
     json_escape_path(file, escaped, sizeof(escaped));
-    char open_msg[4096];
-    snprintf(open_msg, sizeof(open_msg),
-             "{\"jsonrpc\":\"2.0\",\"id\":1,"
-             "\"method\":\"turbodraft.session.open\","
-             "\"params\":{\"path\":\"%s\"}}", escaped);
+    char cwd_raw[PATH_MAX];
+    const char *cwd = getenv("PWD");
+    if (!cwd || !cwd[0]) {
+        if (getcwd(cwd_raw, sizeof(cwd_raw))) cwd = cwd_raw;
+        else cwd = "";
+    }
+    char cwd_escaped[2048];
+    json_escape_path(cwd, cwd_escaped, sizeof(cwd_escaped));
+    char transcript[PATH_MAX] = "";
+    if (home) find_transcript(home, transcript, sizeof(transcript));
+    char queue_path[PATH_MAX] = "";
+    char queue_key[160] = "";
+    int has_queue = pager_queue_attachment_for_transcript(
+        transcript[0] ? transcript : NULL,
+        queue_path, sizeof(queue_path),
+        queue_key, sizeof(queue_key)
+    ) == 0 && queue_path[0] && queue_key[0];
+    char queue_path_escaped[PATH_MAX * 2];
+    char queue_key_escaped[512];
+    if (has_queue) {
+        json_escape_path(queue_path, queue_path_escaped, sizeof(queue_path_escaped));
+        json_escape_path(queue_key, queue_key_escaped, sizeof(queue_key_escaped));
+    }
+
+    char open_msg[12288];
+    if (has_queue) {
+        snprintf(open_msg, sizeof(open_msg),
+                 "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                 "\"method\":\"turbodraft.session.open\","
+                 "\"params\":{\"path\":\"%s\",\"cwd\":\"%s\",\"protocolVersion\":%d,"
+                 "\"source\":\"claude-pager\",\"queuePath\":\"%s\",\"queueKey\":\"%s\","
+                 "\"queueFormatVersion\":%d}}",
+                 escaped, cwd_escaped, kTurboDraftProtocolVersion,
+                 queue_path_escaped, queue_key_escaped, PAGER_QUEUE_FORMAT_VERSION);
+    } else {
+        snprintf(open_msg, sizeof(open_msg),
+                 "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                 "\"method\":\"turbodraft.session.open\","
+                 "\"params\":{\"path\":\"%s\",\"cwd\":\"%s\",\"protocolVersion\":%d,"
+                 "\"source\":\"claude-pager\"}}",
+                 escaped, cwd_escaped, kTurboDraftProtocolVersion);
+    }
 
     if (send_msg(fd, open_msg) < 0) { close(fd); return -1; }
     DBG("session.open sent\n");
 
+    int close_pipe[2] = { -1, -1 };
+    if (pipe(close_pipe) != 0) {
+        close(fd);
+        return 1;
+    }
+    fcntl(close_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(close_pipe[1], F_SETFD, FD_CLOEXEC);
+
     /* Fork pager (runs in parallel with TurboDraft's ~120ms open) */
-    pid_t pager_pid = fork_pager((int)getpid());
+    pid_t pager_pid = fork_pager((int)getpid(), close_pipe[1]);
     DBG("pager forked pid=%d\n", (int)pager_pid);
 
     /* Read session.open response */
     char *resp = recv_msg(fd);
-    if (!resp) { kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(fd); return 1; }
+    if (!resp) { kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(close_pipe[0]); close(fd); return 1; }
 
     char session_id[256] = "";
     extract_str(resp, "sessionId", session_id, sizeof(session_id));
     DBG("sessionId=%s\n", session_id[0] ? session_id : "(missing)");
+    if (!session_id[0]) DBG("session.open raw response: %s\n", resp);
     free(resp);
 
-    if (!session_id[0]) { kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(fd); return 1; }
+    if (!session_id[0]) { kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(close_pipe[0]); close(fd); return 1; }
 
     /* Send session.wait — blocks until TurboDraft session ends */
     char wait_msg[512];
@@ -461,14 +511,81 @@ static int turbodraft_path(const char *home, const char *file) {
              session_id);
 
     if (send_msg(fd, wait_msg) < 0) {
-        kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(fd); return 0;
+        kill(pager_pid, SIGTERM); waitpid(pager_pid, NULL, 0); close(close_pipe[0]); close(fd); return 0;
+    }
+
+    /* Wait for TurboDraft session end, while allowing pager to request
+     * a session-scoped close via Ctrl+Q. */
+    char *resp3 = NULL;
+    int close_requested = 0;
+    for (;;) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        int maxfd = fd;
+        if (close_pipe[0] >= 0) {
+            FD_SET(close_pipe[0], &rfds);
+            if (close_pipe[0] > maxfd) maxfd = close_pipe[0];
+        }
+        int sr = select(maxfd + 1, &rfds, NULL, NULL, NULL);
+        if (sr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (close_pipe[0] >= 0 && FD_ISSET(close_pipe[0], &rfds)) {
+            char cmd = 0;
+            ssize_t n = read(close_pipe[0], &cmd, 1);
+            if (n > 0 && cmd == 'q' && !close_requested) {
+                close_requested = 1;
+                DBG("Ctrl+Q requested TurboDraft session.close\n");
+                char close_msg[512];
+                snprintf(close_msg, sizeof(close_msg),
+                         "{\"jsonrpc\":\"2.0\",\"id\":3,"
+                         "\"method\":\"turbodraft.session.close\","
+                         "\"params\":{\"sessionId\":\"%s\"}}",
+                         session_id);
+                int close_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+                if (close_fd < 0) {
+                    DBG("session.close socket create failed: %s\n", strerror(errno));
+                } else {
+                    struct sockaddr_un close_addr;
+                    memset(&close_addr, 0, sizeof(close_addr));
+                    close_addr.sun_family = AF_UNIX;
+                    strncpy(close_addr.sun_path, sock_path, sizeof(close_addr.sun_path) - 1);
+                    if (connect(close_fd, (struct sockaddr *)&close_addr, sizeof(close_addr)) != 0) {
+                        DBG("session.close connect failed: %s\n", strerror(errno));
+                    } else if (send_msg(close_fd, close_msg) != 0) {
+                        DBG("session.close send failed: %s\n", strerror(errno));
+                    } else {
+                        DBG("session.close sent on dedicated close socket\n");
+                    }
+                    close(close_fd);
+                }
+            } else if (n == 0) {
+                /* Pager exited/closed pipe; keep waiting on session.wait. */
+                close(close_pipe[0]);
+                close_pipe[0] = -1;
+            }
+        }
+        if (FD_ISSET(fd, &rfds)) {
+            char *msg = recv_msg(fd);
+            if (!msg) break;
+            if (strstr(msg, "\"id\":3") != NULL) {
+                DBG("session.close ack received\n");
+                free(msg);
+                continue;
+            }
+            DBG("session.wait response: %s\n", msg);
+            resp3 = msg;
+            break;
+        }
     }
 
     /* --- Close path timing (reset clock to measure from editor close) --- */
-    char *resp3 = recv_msg(fd);
     gettimeofday(&t0, NULL);  /* Reset clock: t=0 is now "editor closed" */
     DBG("--- close path start (session.wait returned)\n");
     if (resp3) free(resp3);
+    if (close_pipe[0] >= 0) close(close_pipe[0]);
     close(fd);
 
     kill(pager_pid, SIGTERM);
@@ -545,6 +662,15 @@ static int is_known_gui_editor(const char *editor) {
     return 0;
 }
 
+static int is_turbodraft_editor(const char *editor) {
+    char tok[256];
+    const char *base = editor_basename(editor, tok);
+    if (!base) return 0;
+    return strcmp(base, "turbodraft") == 0 ||
+           strcmp(base, "turbodraft-app") == 0 ||
+           strcmp(base, "TurboDraft") == 0;
+}
+
 static int is_terminal_editor(const char *editor) {
     /* Env override: CLAUDE_PAGER_EDITOR_TYPE=tui|gui */
     const char *override = getenv("CLAUDE_PAGER_EDITOR_TYPE");
@@ -607,7 +733,7 @@ static int generic_editor_path(const char *editor, const char *file) {
             forced_gui ? " (forced gui)" : "",
             known_gui ? " (known gui)" : "");
 
-        pid_t pager_pid = fork_pager((int)ed_pid);
+        pid_t pager_pid = fork_pager((int)ed_pid, -1);
         DBG("pager forked pid=%d\n", (int)pager_pid);
 
         int status;
@@ -629,7 +755,7 @@ static int generic_editor_path(const char *editor, const char *file) {
     if (ed_pid < 0) return 1;
     DBG("optimistic path: editor forked pid=%d (stdin detached)\n", (int)ed_pid);
 
-    pid_t pager_pid = fork_pager((int)ed_pid);
+    pid_t pager_pid = fork_pager((int)ed_pid, -1);
     DBG("pager forked pid=%d\n", (int)pager_pid);
 
     int probe_status = 0;
@@ -797,6 +923,12 @@ int main(int argc, char *argv[]) {
         source = "system default";
     }
     DBG("resolved editor=%s (from %s)\n", editor, source);
+
+    if (is_turbodraft_editor(editor)) {
+        int rc = turbodraft_path(home, file);
+        if (rc == 0) return 0;
+        DBG("explicit TurboDraft path unavailable, falling back to generic path\n");
+    }
 
     if (is_terminal_editor(editor))
         return terminal_editor_path(editor, file);

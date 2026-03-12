@@ -30,7 +30,7 @@ int main(int argc, char *argv[]) {
     int tty_fd = open("/dev/tty", O_RDWR);
     if (tty_fd < 0) { perror("open /dev/tty"); return 1; }
 
-    run_pager(tty_fd, transcript, editor_pid, ctx_limit);
+    run_pager(tty_fd, transcript, editor_pid, ctx_limit, -1);
     close(tty_fd);
     return 0;
 }
