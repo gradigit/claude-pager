@@ -7,7 +7,8 @@ REPO="https://github.com/gradigit/claude-pager.git"
 INSTALL_DIR="${HOME}/.claude-pager"
 BINARY="${INSTALL_DIR}/bin/claude-pager-open"
 SETTINGS="${HOME}/.claude/settings.json"
-HOOK="${INSTALL_DIR}/shim/save-session-transcript.sh"
+HOOK_SESSION="${INSTALL_DIR}/shim/save-session-transcript.sh"
+HOOK_STOP="${INSTALL_DIR}/shim/queue-drain-stop.sh"
 
 infer_editor_type() {
     local cmd="$1"
@@ -154,21 +155,37 @@ if [[ -n "$FINAL_EDITOR" ]]; then
     echo "Set editor type: $FINAL_EDITOR_TYPE"
 fi
 
-# ── Session hook ─────────────────────────────────────────────────────────────
+# ── Hooks ───────────────────────────────────────────────────────────────────
 if jq -e '.hooks.SessionStart' "$SETTINGS" &>/dev/null; then
     if jq -e '.hooks.SessionStart[] | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
-        echo "Session hook already configured"
+        echo "SessionStart hook already configured"
     else
         SETTINGS_TMP=$(mktemp)
-        jq --arg cmd "$HOOK" '.hooks.SessionStart += [{"type": "command", "command": $cmd}]' "$SETTINGS" > "$SETTINGS_TMP"
+        jq --arg cmd "$HOOK_SESSION" '.hooks.SessionStart += [{"type": "command", "command": $cmd}]' "$SETTINGS" > "$SETTINGS_TMP"
         mv "$SETTINGS_TMP" "$SETTINGS"
-        echo "Added session hook"
+        echo "Added SessionStart hook"
     fi
 else
     SETTINGS_TMP=$(mktemp)
-    jq --arg cmd "$HOOK" '.hooks.SessionStart = [{"type": "command", "command": $cmd}]' "$SETTINGS" > "$SETTINGS_TMP"
+    jq --arg cmd "$HOOK_SESSION" '.hooks.SessionStart = [{"type": "command", "command": $cmd}]' "$SETTINGS" > "$SETTINGS_TMP"
     mv "$SETTINGS_TMP" "$SETTINGS"
-    echo "Added session hook"
+    echo "Added SessionStart hook"
+fi
+
+if jq -e '.hooks.Stop' "$SETTINGS" &>/dev/null; then
+    if jq -e '.hooks.Stop[] | select(.command | contains("queue-drain-stop"))' "$SETTINGS" &>/dev/null; then
+        echo "Stop hook already configured"
+    else
+        SETTINGS_TMP=$(mktemp)
+        jq --arg cmd "$HOOK_STOP" '.hooks.Stop += [{"type": "command", "command": $cmd, "timeout": 10}]' "$SETTINGS" > "$SETTINGS_TMP"
+        mv "$SETTINGS_TMP" "$SETTINGS"
+        echo "Added Stop hook"
+    fi
+else
+    SETTINGS_TMP=$(mktemp)
+    jq --arg cmd "$HOOK_STOP" '.hooks.Stop = [{"type": "command", "command": $cmd, "timeout": 10}]' "$SETTINGS" > "$SETTINGS_TMP"
+    mv "$SETTINGS_TMP" "$SETTINGS"
+    echo "Added Stop hook"
 fi
 
 echo ""
