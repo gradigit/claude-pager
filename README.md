@@ -44,7 +44,7 @@ The runtime is a single compiled C binary — no Python, no Node, no runtime dep
 curl -sSL https://raw.githubusercontent.com/gradigit/claude-pager/main/install.sh | bash
 ```
 
-This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` in `~/.claude/settings.json`, preserves your original editor as `env.CLAUDE_PAGER_EDITOR`, and writes `env.CLAUDE_PAGER_EDITOR_TYPE` (`tui`/`gui`). No shell config changes needed.
+This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` in `~/.claude/settings.json`, preserves your original editor as `env.CLAUDE_PAGER_EDITOR`, writes `env.CLAUDE_PAGER_EDITOR_TYPE` (`tui`/`gui`), and installs the required Claude hooks for transcript lookup + queued prompt draining. No shell config changes needed.
 
 ### AI agent install
 
@@ -114,6 +114,7 @@ If you want the lowest-latency prompt editing feel, use [**TurboDraft**](https:/
 - Terminal resize support (SIGWINCH)
 - Works with any GUI editor (TurboDraft, VS Code, Sublime, etc.)
 - TurboDraft fast path: talks directly to TurboDraft's Unix socket, bypassing shell overhead and handing off session-scoped queue metadata
+- Queue draining is handled by the shipped Claude Stop hook so queued prompts continue automatically
 
 ## Requirements
 
@@ -151,9 +152,12 @@ Add to `~/.claude/settings.json`:
 
 Claude Code sets `editor` as the binary it spawns on Ctrl-G. Since `env` values may not be exported to the editor process, claude-pager reads `~/.claude/settings.json` directly for `env.CLAUDE_PAGER_EDITOR` and `env.CLAUDE_PAGER_EDITOR_TYPE`.
 
-### 2. Install the session hook
+### 2. Install the required hooks
 
-The included hook ensures the pager finds the correct transcript, even with multiple Claude sessions.
+claude-pager uses two Claude hooks:
+
+- **SessionStart** → remembers the exact transcript for the current terminal session
+- **Stop** → drains the next queued prompt from the session queue so prompt queuing continues automatically
 
 Add to `~/.claude/settings.json`:
 
@@ -165,12 +169,19 @@ Add to `~/.claude/settings.json`:
         "type": "command",
         "command": "/path/to/claude-pager/shim/save-session-transcript.sh"
       }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "/path/to/claude-pager/shim/queue-drain-stop.sh",
+        "timeout": 10
+      }
     ]
   }
 }
 ```
 
-Without this hook, the pager falls back to finding the most recent transcript in your project directory.
+Without the SessionStart hook, the pager falls back to the most recent transcript in your project directory. Without the Stop hook, the queued prompt composer UI still appears, but queued prompts will not auto-drain back into Claude after the current response completes.
 
 ## Switching Editors
 
@@ -230,8 +241,10 @@ When you press Ctrl-G in Claude Code:
 3. If TurboDraft is available: connects to its socket and sends `session.open` (~0.02ms) with `cwd`, protocol version, and session-scoped queue metadata
 4. It forks and renders the pager directly in C (~3ms for pre-render, ~5ms for full transcript)
 5. Your editor opens the file — the pager is already visible
-6. On `Ctrl+Q` in the TurboDraft fast path: the pager requests `turbodraft.session.close` for the active session and waits for `turbodraft.session.wait`
-7. On close: once the session actually closes, the binary kills the pager and returns control to Claude Code
+6. Queued prompts are persisted to a session-scoped queue file while you work in the pager composer
+7. The shipped Claude Stop hook drains queued prompts back into Claude after each response completes
+8. On `Ctrl+Q` in the TurboDraft fast path: the pager requests `turbodraft.session.close` for the active session and waits for `turbodraft.session.wait`
+9. On close: once the session actually closes, the binary kills the pager and returns control to Claude Code
 
 The pager keeps mouse interactions enabled for scroll-wheel browsing, link activation, and Shift-drag text selection.
 
@@ -278,11 +291,12 @@ Read `~/.claude/settings.json` (create with `{}` if missing). Use `jq` to:
 1. Save the current `editor` value as `env.CLAUDE_PAGER_EDITOR` (if it exists and isn't already claude-pager)
 2. Set `editor` to the binary path
 3. Infer `env.CLAUDE_PAGER_EDITOR_TYPE` (`tui` or `gui`)
-4. Add the session hook
+4. Add the SessionStart + Stop hooks
 
 ```sh
 BINARY="$HOME/.claude-pager/bin/claude-pager-open"
-HOOK="$HOME/.claude-pager/shim/save-session-transcript.sh"
+HOOK_SESSION="$HOME/.claude-pager/shim/save-session-transcript.sh"
+STOP_HOOK="$HOME/.claude-pager/shim/queue-drain-stop.sh"
 SETTINGS="$HOME/.claude/settings.json"
 
 mkdir -p "$(dirname "$SETTINGS")"
@@ -317,10 +331,17 @@ if [[ -n "$tok" ]]; then
   jq --arg ty "$ty" '.env.CLAUDE_PAGER_EDITOR_TYPE = $ty' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 fi
 
-# Add session hook (if not already present)
+# Add SessionStart hook (if not already present)
 if ! jq -e '.hooks.SessionStart[]? | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
-    jq --arg cmd "$HOOK" '
+    jq --arg cmd "$HOOK_SESSION" '
         .hooks.SessionStart = ((.hooks.SessionStart // []) + [{"type": "command", "command": $cmd}])
+    ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+fi
+
+# Add Stop hook (if not already present)
+if ! jq -e '.hooks.Stop[]? | select(.command | contains("queue-drain-stop"))' "$SETTINGS" &>/dev/null; then
+    jq --arg cmd "$STOP_HOOK" '
+        .hooks.Stop = ((.hooks.Stop // []) + [{"type": "command", "command": $cmd, "timeout": 10}])
     ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 fi
 ```
@@ -334,7 +355,8 @@ Tell the user to restart Claude Code and press **Ctrl-G**. The pager will render
 - The binary auto-detects TurboDraft's Unix socket — no special config needed for TurboDraft users
 - Editor resolution: `CLAUDE_PAGER_EDITOR` (env or settings.json) → `VISUAL` → `EDITOR` → `open -W -t` (macOS default)
 - `CLAUDE_PAGER_EDITOR_TYPE` is also read from env or settings.json (`tui`/`gui` override)
-- The session hook enables multi-session support; without it the pager falls back to the most recent transcript in the project directory
+- The SessionStart hook enables multi-session transcript lookup; without it the pager falls back to the most recent transcript in the project directory
+- The Stop hook drains queued prompts from the session queue back into Claude after each completed response
 - `_CLAUDE_PAGER_ACTIVE` env var is set internally to prevent recursion — agents do not need to set this
 - No shell config changes (VISUAL/EDITOR) are needed — settings.json is the canonical configuration path
 
