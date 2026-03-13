@@ -50,6 +50,8 @@ This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` 
 
 Paste the repo URL into Claude Code or any AI coding agent. The [agent instructions](#agent-instructions) below have everything it needs to install and configure claude-pager automatically.
 
+Important: Claude hook entries must use the current `matcher` + `hooks` array schema. Flat hook objects like `{"type":"command","command":"..."}` under `hooks.SessionStart` or `hooks.Stop` are invalid in current Claude releases.
+
 ### Prebuilt binaries
 
 If you don't want to compile locally, download the latest release assets from the GitHub releases page:
@@ -166,15 +168,25 @@ Add to `~/.claude/settings.json`:
   "hooks": {
     "SessionStart": [
       {
-        "type": "command",
-        "command": "/path/to/claude-pager/shim/save-session-transcript.sh"
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/claude-pager/shim/save-session-transcript.sh"
+          }
+        ]
       }
     ],
     "Stop": [
       {
-        "type": "command",
-        "command": "/path/to/claude-pager/shim/queue-drain-stop.sh",
-        "timeout": 10
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/claude-pager/shim/queue-drain-stop.sh",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }
@@ -293,6 +305,8 @@ Read `~/.claude/settings.json` (create with `{}` if missing). Use `jq` to:
 3. Infer `env.CLAUDE_PAGER_EDITOR_TYPE` (`tui` or `gui`)
 4. Add the SessionStart + Stop hooks
 
+Important: Claude hooks must use the wrapped `matcher` + `hooks` schema shown below. Do not write legacy flat command objects directly under `hooks.SessionStart` or `hooks.Stop`.
+
 ```sh
 BINARY="$HOME/.claude-pager/bin/claude-pager-open"
 HOOK_SESSION="$HOME/.claude-pager/shim/save-session-transcript.sh"
@@ -331,17 +345,61 @@ if [[ -n "$tok" ]]; then
   jq --arg ty "$ty" '.env.CLAUDE_PAGER_EDITOR_TYPE = $ty' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 fi
 
+# Normalize legacy flat hook objects into Claude's current matcher+hooks schema
+jq '
+  def normalize_event_array:
+    if type == "array" then
+      map(
+        if (type == "object" and (.hooks? | type) == "array") then
+          .
+        elif (type == "object" and .type == "command" and (.command? | type) == "string") then
+          {matcher: "", hooks: [(
+            if has("timeout") then
+              {type, command, timeout}
+            else
+              {type, command}
+            end
+          )]}
+        else
+          .
+        end
+      )
+    else
+      []
+    end;
+  .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
+  .hooks.SessionStart = ((.hooks.SessionStart // []) | normalize_event_array) |
+  .hooks.Stop = ((.hooks.Stop // []) | normalize_event_array)
+' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+
 # Add SessionStart hook (if not already present)
-if ! jq -e '.hooks.SessionStart[]? | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
+if ! jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
     jq --arg cmd "$HOOK_SESSION" '
-        .hooks.SessionStart = ((.hooks.SessionStart // []) + [{"type": "command", "command": $cmd}])
+        .hooks.SessionStart = ((.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": $cmd
+                }
+            ]
+        }])
     ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 fi
 
 # Add Stop hook (if not already present)
-if ! jq -e '.hooks.Stop[]? | select(.command | contains("queue-drain-stop"))' "$SETTINGS" &>/dev/null; then
+if ! jq -e '.hooks.Stop[]?.hooks[]? | select(.command | contains("queue-drain-stop"))' "$SETTINGS" &>/dev/null; then
     jq --arg cmd "$STOP_HOOK" '
-        .hooks.Stop = ((.hooks.Stop // []) + [{"type": "command", "command": $cmd, "timeout": 10}])
+        .hooks.Stop = ((.hooks.Stop // []) + [{
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": $cmd,
+                    "timeout": 10
+                }
+            ]
+        }])
     ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 fi
 ```

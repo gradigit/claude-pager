@@ -25,6 +25,47 @@ infer_editor_type() {
     esac
 }
 
+apply_jq() {
+    local argc=$#
+    local filter="${!argc}"
+    local jq_args=()
+    if (( argc > 1 )); then
+        jq_args=("${@:1:argc-1}")
+    fi
+    local tmp
+    tmp=$(mktemp)
+    jq "${jq_args[@]}" "$filter" "$SETTINGS" > "$tmp"
+    mv "$tmp" "$SETTINGS"
+}
+
+normalize_hook_events() {
+    apply_jq '
+        def normalize_event_array:
+            if type == "array" then
+                map(
+                    if (type == "object" and (.hooks? | type) == "array") then
+                        .
+                    elif (type == "object" and .type == "command" and (.command? | type) == "string") then
+                        {matcher: "", hooks: [(
+                            if has("timeout") then
+                                {type, command, timeout}
+                            else
+                                {type, command}
+                            end
+                        )]}
+                    else
+                        .
+                    end
+                )
+            else
+                []
+            end;
+        .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
+        .hooks.SessionStart = ((.hooks.SessionStart // []) | normalize_event_array) |
+        .hooks.Stop = ((.hooks.Stop // []) | normalize_event_array)
+    '
+}
+
 echo "Installing claude-pager..."
 
 # ── Clone or update ──────────────────────────────────────────────────────────
@@ -156,35 +197,40 @@ if [[ -n "$FINAL_EDITOR" ]]; then
 fi
 
 # ── Hooks ───────────────────────────────────────────────────────────────────
-if jq -e '.hooks.SessionStart' "$SETTINGS" &>/dev/null; then
-    if jq -e '.hooks.SessionStart[] | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
-        echo "SessionStart hook already configured"
-    else
-        SETTINGS_TMP=$(mktemp)
-        jq --arg cmd "$HOOK_SESSION" '.hooks.SessionStart += [{"type": "command", "command": $cmd}]' "$SETTINGS" > "$SETTINGS_TMP"
-        mv "$SETTINGS_TMP" "$SETTINGS"
-        echo "Added SessionStart hook"
-    fi
+normalize_hook_events
+
+if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
+    echo "SessionStart hook already configured"
 else
-    SETTINGS_TMP=$(mktemp)
-    jq --arg cmd "$HOOK_SESSION" '.hooks.SessionStart = [{"type": "command", "command": $cmd}]' "$SETTINGS" > "$SETTINGS_TMP"
-    mv "$SETTINGS_TMP" "$SETTINGS"
+    apply_jq --arg cmd "$HOOK_SESSION" '
+        .hooks.SessionStart += [{
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": $cmd
+                }
+            ]
+        }]
+    '
     echo "Added SessionStart hook"
 fi
 
-if jq -e '.hooks.Stop' "$SETTINGS" &>/dev/null; then
-    if jq -e '.hooks.Stop[] | select(.command | contains("queue-drain-stop"))' "$SETTINGS" &>/dev/null; then
-        echo "Stop hook already configured"
-    else
-        SETTINGS_TMP=$(mktemp)
-        jq --arg cmd "$HOOK_STOP" '.hooks.Stop += [{"type": "command", "command": $cmd, "timeout": 10}]' "$SETTINGS" > "$SETTINGS_TMP"
-        mv "$SETTINGS_TMP" "$SETTINGS"
-        echo "Added Stop hook"
-    fi
+if jq -e '.hooks.Stop[]?.hooks[]? | select(.command | contains("queue-drain-stop"))' "$SETTINGS" &>/dev/null; then
+    echo "Stop hook already configured"
 else
-    SETTINGS_TMP=$(mktemp)
-    jq --arg cmd "$HOOK_STOP" '.hooks.Stop = [{"type": "command", "command": $cmd, "timeout": 10}]' "$SETTINGS" > "$SETTINGS_TMP"
-    mv "$SETTINGS_TMP" "$SETTINGS"
+    apply_jq --arg cmd "$HOOK_STOP" '
+        .hooks.Stop += [{
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": $cmd,
+                    "timeout": 10
+                }
+            ]
+        }]
+    '
     echo "Added Stop hook"
 fi
 
