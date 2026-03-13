@@ -34,7 +34,11 @@ apply_jq() {
     fi
     local tmp
     tmp=$(mktemp)
-    jq "${jq_args[@]}" "$filter" "$SETTINGS" > "$tmp"
+    if (( ${#jq_args[@]} > 0 )); then
+        jq "${jq_args[@]}" "$filter" "$SETTINGS" > "$tmp"
+    else
+        jq "$filter" "$SETTINGS" > "$tmp"
+    fi
     mv "$tmp" "$SETTINGS"
 }
 
@@ -46,7 +50,7 @@ normalize_hook_events() {
                     if (type == "object" and (.hooks? | type) == "array") then
                         .
                     elif (type == "object" and .type == "command" and (.command? | type) == "string") then
-                        {matcher: "", hooks: [(
+                        {hooks: [(
                             if has("timeout") then
                                 {type, command, timeout}
                             else
@@ -199,12 +203,11 @@ fi
 # ── Hooks ───────────────────────────────────────────────────────────────────
 normalize_hook_events
 
-if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
+if jq -e --arg cmd "$HOOK_SESSION" '.hooks.SessionStart[]?.hooks[]? | select(.command == $cmd)' "$SETTINGS" &>/dev/null; then
     echo "SessionStart hook already configured"
 else
     apply_jq --arg cmd "$HOOK_SESSION" '
         .hooks.SessionStart += [{
-            "matcher": "",
             "hooks": [
                 {
                     "type": "command",
@@ -216,12 +219,11 @@ else
     echo "Added SessionStart hook"
 fi
 
-if jq -e '.hooks.Stop[]?.hooks[]? | select(.command | contains("queue-drain-stop"))' "$SETTINGS" &>/dev/null; then
+if jq -e --arg cmd "$HOOK_STOP" '.hooks.Stop[]?.hooks[]? | select(.command == $cmd)' "$SETTINGS" &>/dev/null; then
     echo "Stop hook already configured"
 else
     apply_jq --arg cmd "$HOOK_STOP" '
         .hooks.Stop += [{
-            "matcher": "",
             "hooks": [
                 {
                     "type": "command",
@@ -232,6 +234,19 @@ else
         }]
     '
     echo "Added Stop hook"
+fi
+
+if ! jq -e '
+    (.hooks.SessionStart | type) == "array" and
+    any(.hooks.SessionStart[]?; (.hooks | type) == "array") and
+    any(.hooks.SessionStart[]?.hooks[]?; (.type == "command") and (.command == $session_cmd)) and
+    (.hooks.Stop | type) == "array" and
+    any(.hooks.Stop[]?; (.hooks | type) == "array") and
+    any(.hooks.Stop[]?.hooks[]?; (.type == "command") and (.command == $stop_cmd) and ((.timeout // 10) == 10))
+' --arg session_cmd "$HOOK_SESSION" --arg stop_cmd "$HOOK_STOP" "$SETTINGS" >/dev/null; then
+    echo "ERROR: Claude hook installation failed validation." >&2
+    echo "Expected nested hook groups with hooks[] arrays for SessionStart and Stop." >&2
+    exit 1
 fi
 
 echo ""

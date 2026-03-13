@@ -50,7 +50,7 @@ This clones the repo to `~/.claude-pager`, builds the binary, sets the `editor` 
 
 Paste the repo URL into Claude Code or any AI coding agent. The [agent instructions](#agent-instructions) below have everything it needs to install and configure claude-pager automatically.
 
-Important: Claude hook entries must use the current `matcher` + `hooks` array schema. Flat hook objects like `{"type":"command","command":"..."}` under `hooks.SessionStart` or `hooks.Stop` are invalid in current Claude releases.
+Important: Claude hook entries must use hook-group objects with a nested `hooks` array. Flat hook objects like `{"type":"command","command":"..."}` directly under `hooks.SessionStart` or `hooks.Stop` are invalid in current Claude releases.
 
 ### Prebuilt binaries
 
@@ -168,7 +168,6 @@ Add to `~/.claude/settings.json`:
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -179,7 +178,6 @@ Add to `~/.claude/settings.json`:
     ],
     "Stop": [
       {
-        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -305,7 +303,7 @@ Read `~/.claude/settings.json` (create with `{}` if missing). Use `jq` to:
 3. Infer `env.CLAUDE_PAGER_EDITOR_TYPE` (`tui` or `gui`)
 4. Add the SessionStart + Stop hooks
 
-Important: Claude hooks must use the wrapped `matcher` + `hooks` schema shown below. Do not write legacy flat command objects directly under `hooks.SessionStart` or `hooks.Stop`.
+Important: Claude hooks must use wrapped hook-group objects with nested `hooks` arrays. Do not write legacy flat command objects directly under `hooks.SessionStart` or `hooks.Stop`.
 
 ```sh
 BINARY="$HOME/.claude-pager/bin/claude-pager-open"
@@ -353,7 +351,7 @@ jq '
         if (type == "object" and (.hooks? | type) == "array") then
           .
         elif (type == "object" and .type == "command" and (.command? | type) == "string") then
-          {matcher: "", hooks: [(
+          {hooks: [(
             if has("timeout") then
               {type, command, timeout}
             else
@@ -373,10 +371,9 @@ jq '
 ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 
 # Add SessionStart hook (if not already present)
-if ! jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("save-session-transcript"))' "$SETTINGS" &>/dev/null; then
+if ! jq -e --arg cmd "$HOOK_SESSION" '.hooks.SessionStart[]?.hooks[]? | select(.command == $cmd)' "$SETTINGS" &>/dev/null; then
     jq --arg cmd "$HOOK_SESSION" '
         .hooks.SessionStart = ((.hooks.SessionStart // []) + [{
-            "matcher": "",
             "hooks": [
                 {
                     "type": "command",
@@ -388,10 +385,9 @@ if ! jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("save-s
 fi
 
 # Add Stop hook (if not already present)
-if ! jq -e '.hooks.Stop[]?.hooks[]? | select(.command | contains("queue-drain-stop"))' "$SETTINGS" &>/dev/null; then
+if ! jq -e --arg cmd "$STOP_HOOK" '.hooks.Stop[]?.hooks[]? | select(.command == $cmd)' "$SETTINGS" &>/dev/null; then
     jq --arg cmd "$STOP_HOOK" '
         .hooks.Stop = ((.hooks.Stop // []) + [{
-            "matcher": "",
             "hooks": [
                 {
                     "type": "command",
@@ -402,6 +398,16 @@ if ! jq -e '.hooks.Stop[]?.hooks[]? | select(.command | contains("queue-drain-st
         }])
     ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 fi
+
+# Validate final hook shape
+jq -e --arg session_cmd "$HOOK_SESSION" --arg stop_cmd "$STOP_HOOK" '
+  (.hooks.SessionStart | type) == "array" and
+  any(.hooks.SessionStart[]?; (.hooks | type) == "array") and
+  any(.hooks.SessionStart[]?.hooks[]?; (.type == "command") and (.command == $session_cmd)) and
+  (.hooks.Stop | type) == "array" and
+  any(.hooks.Stop[]?; (.hooks | type) == "array") and
+  any(.hooks.Stop[]?.hooks[]?; (.type == "command") and (.command == $stop_cmd) and ((.timeout // 10) == 10))
+' "$SETTINGS" >/dev/null
 ```
 
 ### 4. Done
