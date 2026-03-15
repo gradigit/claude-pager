@@ -79,6 +79,7 @@
 #define FBLK "\xe2\x96\x88"
 #define EBLK "\xe2\x96\x91"
 #define DOT "\xc2\xb7"
+#define WRAP_PLACEHOLDER "\x1f"
 #define TL  "\xe2\x94\x8c"
 #define TR  "\xe2\x94\x90"
 #define BL  "\xe2\x94\x94"
@@ -2202,6 +2203,10 @@ static void L_push_blank_once(Lines *l) {
     }
 }
 
+static int line_is_wrap_placeholder(const char *s) {
+    return s && s[0] == WRAP_PLACEHOLDER[0] && s[1] == '\0';
+}
+
 static void L_prepend(Lines *l, const char *s) {
     if (!l || !s || g_oom) return;
     if (l->n >= l->cap) {
@@ -2257,7 +2262,26 @@ static int vlen(const char *s) {
 static void L_pushw(Lines *l, const char *s) {
     L_push(l, s);
     int v = vlen(s);
-    if (v > g_cols) { int extra = (v + g_cols - 1) / g_cols - 1; for (int i=0; i<extra; i++) L_push(l, ""); }
+    if (v > g_cols) {
+        int extra = (v + g_cols - 1) / g_cols - 1;
+        for (int i = 0; i < extra; i++) L_push(l, WRAP_PLACEHOLDER);
+    }
+}
+
+static int normalize_off_visual(const Lines *l, int off, int dir) {
+    if (!l || l->n <= 0) return 0;
+    if (off < 0) off = 0;
+    if (off >= l->n) off = l->n - 1;
+    if (!line_is_wrap_placeholder(l->d[off])) return off;
+
+    if (dir >= 0) {
+        while (off < l->n && line_is_wrap_placeholder(l->d[off])) off++;
+        if (off >= l->n) off = l->n - 1;
+        while (off > 0 && line_is_wrap_placeholder(l->d[off])) off--;
+    } else {
+        while (off > 0 && line_is_wrap_placeholder(l->d[off])) off--;
+    }
+    return off;
 }
 
 /* ── OSC-8 linkification ──────────────────────────────────────────────── */
@@ -5178,10 +5202,14 @@ static void draw(Lines *L, int off, int tok, double pct, int cl, int first) {
     if (end > L->n) end = L->n;
 
     for (int i = off; i < end; i++) {
-        int used_rows = link_map_track_line(L->d[i], row);
+        if (line_is_wrap_placeholder(L->d[i])) {
+            row++;
+            continue;
+        }
+        (void)link_map_track_line(L->d[i], row);
         emit_line_with_hover(L->d[i], row);
         ob("\033[K\n");
-        row += (used_rows > 0 ? used_rows : 1);
+        row++;
     }
 
     int body_end = (g_queue_rows > 0) ? (g_rows - 3 - g_queue_rows) : (g_rows - 3);
@@ -5634,7 +5662,13 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
                 I_free(&items);
                 if (off < 0) off = 0;
                 if (off >= L.n) off = L.n > 0 ? (L.n - 1) : 0;
-                if (!uscroll) { int b = L.n-(g_crows-1); off = b>0 ? b : 0; }
+                if (!uscroll) {
+                    int b = L.n-(g_crows-1);
+                    off = b>0 ? b : 0;
+                    off = normalize_off_visual(&L, off, -1);
+                } else {
+                    off = normalize_off_visual(&L, off, -1);
+                }
             }
         } else if (first) {
             cc = 1;
@@ -5841,10 +5875,12 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
             } else if (inp == INP_MOUSE_IGNORE) {
                 inp = INP_NONE;
             } else if (inp == INP_WHEEL_UP || inp == INP_WHEEL_DOWN) {
-                off += (inp == INP_WHEEL_UP) ? -1 : 1;
+                int delta = (inp == INP_WHEEL_UP) ? -1 : 1;
+                off += delta;
                 if (off < 0) off = 0;
                 int mx = L.n > 0 ? L.n - 1 : 0;
                 if (off > mx) off = mx;
+                off = normalize_off_visual(&L, off, delta);
                 uscroll = 1;
                 hover_link_set("", 0);
                 rehit_hover_after_draw = 1;
@@ -5854,6 +5890,7 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
                 if (off < 0) off = 0;
                 int mx = L.n > 0 ? L.n - 1 : 0;
                 if (off > mx) off = mx;
+                off = normalize_off_visual(&L, off, inp);
                 uscroll = 1;
                 hover_link_set("", 0);
                 rehit_hover_after_draw = 1;
@@ -5863,6 +5900,7 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
                 if (off < 0) off = 0;
                 int mx = L.n > 0 ? L.n - 1 : 0;
                 if (off > mx) off = mx;
+                off = normalize_off_visual(&L, off, inp);
                 uscroll = 1;
                 hover_link_set("", 0);
                 rehit_hover_after_draw = 1;
@@ -5896,13 +5934,15 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
                     sc = 1;
                 }
             } else if (inp == INP_HOME) { off=0; uscroll=1; sc=1; }
-            else if (inp == INP_END) { int b=L.n-(g_crows-1); off=b>0?b:0; uscroll=0; sc=1; }
+            else if (inp == INP_END) { int b=L.n-(g_crows-1); off=b>0?b:0; off = normalize_off_visual(&L, off, -1); uscroll=0; sc=1; }
             else if (inp == INP_MOUSE_IGNORE) { inp = INP_NONE; }
             else if (inp == INP_WHEEL_UP || inp == INP_WHEEL_DOWN) {
-                off += (inp == INP_WHEEL_UP) ? -1 : 1;
+                int delta = (inp == INP_WHEEL_UP) ? -1 : 1;
+                off += delta;
                 if (off<0) off=0;
                 int mx = L.n>0 ? L.n-1 : 0;
                 if (off>mx) off=mx;
+                off = normalize_off_visual(&L, off, delta);
                 uscroll = 1;
                 hover_link_set("", 0);
                 rehit_hover_after_draw = 1;
@@ -5913,6 +5953,7 @@ void run_pager(int tty_fd, const char *transcript, int editor_pid, int ctx_limit
                 if (off<0) off=0;
                 int mx = L.n>0 ? L.n-1 : 0;
                 if (off>mx) off=mx;
+                off = normalize_off_visual(&L, off, inp);
                 uscroll = 1;
                 hover_link_set("", 0);
                 rehit_hover_after_draw = 1;
